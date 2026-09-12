@@ -1,8 +1,9 @@
 # Generated scene assets — rebuild with the scripts in src/python
-data/
+data/audio/
+data/scenes/
 
 # Source media stays out of git; it lives on the recorder and in the shared drive
-resources/
+resources
 
 node_modules/
 __pycache__/

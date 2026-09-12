@@ -2,7 +2,7 @@
 """
 check_coverage.py — do we have a sound for everything we can see?
 
-Reads each scene's `scene_classes.txt` (what segmentation found) and its `scene.json`
+Reads each scene's `<image>_classes.txt` (what segmentation found) and its `scene.json`
 (what audio is actually wired up), and reports the gap. A class that covers a quarter of
 the view with no sound attached is the most audible hole a scene can have, and it is
 invisible until you look for it.
@@ -83,10 +83,13 @@ def main():
 
     all_gaps = {}
     for d in dirs:
-        cls_file = d / "scene_classes.txt"
+        # The report is named after the source image (IMG_1234_classes.txt); older
+        # scenes used a fixed name, so accept both.
+        reports = sorted(d.glob("*_classes.txt"))
         scene_file = d / "scene.json"
-        if not cls_file.exists():
+        if not reports:
             continue
+        cls_file = reports[0]
         detected = [(c, v) for c, v in read_classes(cls_file) if v >= args.min_percent]
         have = layer_classes(json.loads(scene_file.read_text())) if scene_file.exists() else set()
 

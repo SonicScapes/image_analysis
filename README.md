@@ -15,7 +15,8 @@ resources/                  source material, not in git
   photos/                   iPhone photos and sweep panoramas
   panoramas360/             raw Insta360 .insp — dual fisheye, rejected on purpose
   panoramas360_static/      Insta360 Studio equirect exports — use these
-  sounds/                   handheld recorder WAVs from the site
+  recordings/               our own handheld-recorder WAVs from the site
+  sounds-freesound/         CC0 downloads that fill classes we did not record
 src/
   python/                   offline pipeline — runs once per location
     image_analysis/
@@ -31,7 +32,8 @@ src/
       index.html, app.js    the viewer: pan the image, hear the mix follow
     tools/
       fetch-sounds.mjs      fill gaps from Freesound (CC0) for sounds we didn't record
-data/scenes/<id>/           generated: panorama.jpg, *.mp3, scene.json
+data/audio/                 processed stems, shared by every scene (never per-scene)
+data/scenes/<id>/           generated: panorama.jpg, scene.json, overlay*.png
 ```
 
 Python and JavaScript never call each other. Python writes `scene.json`; JavaScript reads
@@ -61,17 +63,28 @@ python src/python/image_analysis/ingest_images.py --in resources/photos \
     --pick IMG_8753.HEIC IMG_8754.HEIC IMG_8755.HEIC IMG_8756.HEIC \
     --each --scene poi
 
-# PREPARE — recorder WAVs in, seamless loops + one layer each out
-python src/python/audio_prep/prepare_audio.py --scene hohe-tauern
+# PREPARE — our recordings in, seamless loops + one layer each out.
+# --labelled-only uses just the takes whose filename says what they are; without it
+# every recording becomes a simultaneous layer.
+python src/python/audio_prep/prepare_audio.py --scene hohe-tauern --labelled-only
 
 # serve the repo ROOT (not the app folder) and open the app
 npm run dev
 # http://localhost:3000/src/js/app/index.html
 ```
 
-Both write into `data/scenes/hohe-tauern/`, so **use the same `--scene` name for both** or
-you get two half-built scenes. Order does not matter: each merges into `scene.json`
-instead of replacing it.
+`ingest_images.py` writes into `data/scenes/hohe-tauern/`, so **use the same `--scene`
+name for both** or you get two half-built scenes. Order does not matter: each merges into
+`scene.json` instead of replacing it.
+
+**Audio is not stored per scene.** `prepare_audio.py` writes stems to one shared pool at
+`data/audio/`, and `scene.json` points at them with a relative path
+(`../../audio/water.mp3`). This is safe because the engine never modifies a file: every
+gain, pan, filter and distance decision happens at runtime from the numbers in
+`scene.json`, and every stem is normalised to the same level so those numbers mean the
+same thing everywhere. A stem used by five scenes is one file, encoded once — a re-run
+for a second scene reports `reused` instead of spending the time again (`--force`
+re-encodes).
 
 Re-running is safe. `prepare_audio.py` keeps any `az` / `el` / `distance` you have tuned
 by ear and only refreshes the audio files, so the loop is: listen, edit `scene.json`,
@@ -109,9 +122,21 @@ Each scene folder then gains three files beside `scene.json`:
 | File | What it is |
 | --- | --- |
 | `scene.segmented.json` | engine-ready geometry, plus a `classes` block. Never overwrites `scene.json` |
-| `scene_classes.txt` | class coverage as integer percentages, `other` last |
-| `overlay.png` | the photo with the labels painted over it — the pitch image |
+| `<image>_classes.txt` | class coverage as integer percentages, `other` last — named after the source image |
+| `overlay.png` | the photo with the labels painted over it |
+| `overlay_labeled.png` | the same, with class names, shares and distances written on the regions — the pitch image |
 | `labels.png` | the raw sphere label map |
+
+The viewer can show any of these in place of the photo: the **Photo / Overlay / Named /
+Labels** buttons in the top-left swap the displayed image while keeping the pan, which is
+how you check whether `waterfall` really landed on a waterfall.
+
+### Exploring without sound
+
+The gate has a second button, **Explore without sound**. It skips audio entirely — no
+AudioContext, no downloads, no graph — but geometry, visibility, the meters and the
+compass all still run. Use it to check placement before any audio exists, or when a scene
+has no layers yet.
 
 ### Do we have a sound for everything we can see?
 
@@ -119,19 +144,28 @@ Each scene folder then gains three files beside `scene.json`:
 python src/python/audio_prep/check_coverage.py --queries
 ```
 
-Compares each scene's `scene_classes.txt` against the layers wired up in its `scene.json`
+Compares each scene's `<image>_classes.txt` against the layers wired up in its `scene.json`
 and prints the gap, biggest share of the view first, with a Freesound query for each.
 Classes that are silent by design (`sky`, `trail`) are reported as such, not as holes.
 
-Then fill the gaps:
+Then fill the gaps. Downloads are **source material**, so they land in
+`resources/sounds-freesound/` beside our own takes — not in `data/scenes/`, which holds
+only what the pipeline generates — and they go through the same `prepare_audio.py`:
 
 ```bash
 export FREESOUND_TOKEN=xxxxxxxx        # https://freesound.org/apiv2/apply/
 node src/js/tools/fetch-sounds.mjs
+
+python src/python/audio_prep/prepare_audio.py \
+    --in resources/sounds-freesound --scene hohe-tauern
 ```
 
 Its query table is aimed at what segmentation actually found in the Hohe Tauern —
 rock, snow, scree, glacier — not at the forest-and-lake set we assumed before shooting.
+Files are named after the class they fill (`rock-1.mp3`, `snow-1.mp3`), and
+`prepare_audio.py` recognises those names, so the layers come out positioned and tagged
+without further work. Run it twice — once per source folder — and the second run merges
+into the first.
 
 `docs/image_categories.md` lists every category, where the lists live, and how to add one.
 See `docs/segmentation.md` for what runs offline and the sphere-geometry traps — and read

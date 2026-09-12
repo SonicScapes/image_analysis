@@ -48,7 +48,7 @@ const SCENE = {
   // snow, scree and glacier dominate, and we recorded none of them. Water and waterfall
   // are deliberately absent: we have our own, and ours are better.
   //
-  // Percentages are the share of the view each class covered, from scene_classes.txt.
+  // Percentages are the share of the view each class covered, from each scene's class report.
   // Run src/python/audio_prep/check_coverage.py to regenerate this list for new scenes.
   layers: [
     // rock — up to 40% of the view. The single biggest hole.
@@ -112,10 +112,13 @@ async function download(url, dest) {
   await writeFile(dest, Buffer.from(await res.arrayBuffer()));
 }
 
+// Downloads are SOURCE material, so they live beside our own recordings under
+// resources/ — not in data/scenes/, which holds only what the pipeline generates.
+// prepare_audio.py then turns them into scene layers exactly as it does our own takes.
 const here = path.dirname(new URL(import.meta.url).pathname);
 const outDir = process.env.OUT_DIR
   ? path.resolve(process.env.OUT_DIR)
-  : path.resolve(here, '../../../data/scenes', SCENE.id);
+  : path.resolve(here, '../../../resources/sounds-freesound');
 if (!existsSync(outDir)) await mkdir(outDir, { recursive: true });
 
 const credits = [];
@@ -152,15 +155,9 @@ for (const spec of SCENE.layers) {
   console.log(`${files.length} file(s) — ${hits[0].license}`);
 }
 
-const manifest = {
-  id: SCENE.id,
-  name: SCENE.name,
-  north_offset_deg: 0,
-  scene: SCENE.scene,
-  layers: manifestLayers,
-};
-
-await writeFile(path.join(outDir, 'scene.json'), JSON.stringify(manifest, null, 2));
+// Reference only — prepare_audio.py derives the real geometry from the filenames.
+await writeFile(path.join(outDir, 'suggested-layers.json'),
+                JSON.stringify({ layers: manifestLayers }, null, 2));
 
 const creditsMd = [
   `# Audio credits — ${SCENE.name}`,
@@ -176,5 +173,6 @@ const creditsMd = [
 await writeFile(path.join(outDir, 'CREDITS.md'), creditsMd);
 
 console.log(`\nDone. ${credits.length} files in ${outDir}`);
-console.log(`Scene manifest: ${path.join(outDir, 'scene.json')}`);
-console.log(`Merge these layers into scene.json, then open src/js/app/index.html\n`);
+console.log('\nNow turn them into scene layers, same as our own recordings:');
+console.log('  python src/python/audio_prep/prepare_audio.py \\');
+console.log('      --in resources/sounds-freesound --scene hohe-tauern\n');

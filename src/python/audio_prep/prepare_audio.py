@@ -19,20 +19,30 @@ This does the whole conversion:
 Short files (< 12 s by default) are treated as one-shot events instead: normalised, not
 looped, and emitted as `type: "event"`.
 
-    python prepare_audio.py                      # uses the repo's resources/sounds
+    python prepare_audio.py                      # our own takes, resources/recordings
+    python prepare_audio.py --in resources/sounds-freesound --scene hohe-tauern
     python prepare_audio.py --loop-seconds 25 --scene hohe-tauern-wasserfall
 
 Needs: ffmpeg + ffprobe on PATH, numpy. Nothing else.
 """
 
-import argparse, json, math, re, shutil, subprocess, sys
+import argparse, json, math, os, re, shutil, subprocess, sys
 from pathlib import Path
 
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[3]
-DEFAULT_IN = REPO / "resources" / "sounds"
+# Our own field recordings. (Folder was renamed from `sounds`; fall back to it so a
+# teammate who has not pulled still works.)
+DEFAULT_IN = (REPO / "resources" / "recordings"
+              if (REPO / "resources" / "recordings").is_dir()
+              else REPO / "resources" / "sounds")
+FREESOUND_IN = REPO / "resources" / "sounds-freesound"
 DEFAULT_OUT = REPO / "data" / "scenes"
+# One shared pool for processed audio. The engine never modifies these files — every
+# gain, pan, filter and distance decision happens at runtime from scene.json — so a
+# stem is identical for every scene that uses it and copying it per scene is waste.
+AUDIO_OUT = REPO / "data" / "audio"
 
 SR = 48000              # working sample rate
 ANALYSIS_SR = 8000      # enough to find a stationary window, 6x faster to decode
@@ -66,33 +76,81 @@ HINTS = [
                                             dict(az=120, el=-8,  spread=50, distance=40,  gain=-6, focus=6, tags=["human"])),
     (r"lift|seilbahn|gondel|cable|road|traffic|car", "infrastructure",
                                             dict(az=60,  el=8,   spread=40, distance=250, gain=-2, focus=8, tags=["human"])),
+
+    # Segmentation class names, so files fetched to fill a gap (rock-1.mp3, snow-2.mp3)
+    # classify themselves. Geometry here is a starting point; tune it by ear.
+    (r"^rock",      "rock",      dict(az=0,   el=5,   spread=70, distance=400, gain=-14, focus=6, tags=["wind"])),
+    (r"^snow",      "snow",      dict(az=60,  el=0,   spread=60, distance=300, gain=-16, focus=6)),
+    (r"^scree",     "scree",     dict(az=300, el=-10, spread=55, distance=250, gain=-12, focus=7)),
+    (r"^glacier",   "glacier",   dict(az=20,  el=0,   spread=40, distance=500, gain=-14, focus=7)),
+    (r"^pasture",   "pasture",   dict(az=150, el=-12, spread=60, distance=60,  gain=-12, focus=7)),
+    (r"^built",     "built",     dict(az=200, el=-5,  spread=30, distance=150, gain=-18, focus=8)),
+    (r"^cattle",    "cattle",    dict(az=150, el=-8,  spread=40, distance=300, gain=4,  focus=6, tags=["wildlife"])),
+    (r"^animal",    "animal",    dict(az=330, el=30,  spread=70, distance=250, gain=2,  focus=6, tags=["wildlife"])),
+    (r"^marmot",    "marmot",    dict(az=260, el=-5,  spread=40, distance=150, gain=3,  focus=6, tags=["wildlife"])),
+    (r"^rockfall",  "rockfall",  dict(az=300, el=0,   spread=45, distance=380, gain=2,  focus=7)),
+    (r"^cablecar",  "cablecar",  dict(az=60,  el=8,   spread=40, distance=250, gain=-2, focus=8, tags=["human"])),
+    (r"^person",    "person",    dict(az=200, el=-5,  spread=50, distance=60,  gain=-4, focus=7, tags=["human"])),
 ]
 
 
 def need(tool):
+    """
+    Check the tool RUNS, not merely that it exists. A conda ffmpeg with a missing dylib
+    is on PATH and aborts with SIGABRT on every call, which surfaces as a traceback from
+    whichever file happened to be first — a confusing way to learn your install is broken.
+    """
     if not shutil.which(tool):
-        sys.exit(f"{tool} not found on PATH. brew install ffmpeg")
+        sys.exit(f"{tool} not found on PATH.\n"
+                 f"  conda install -c conda-forge ffmpeg     (or: brew install ffmpeg)")
+    try:
+        r = subprocess.run([tool, "-version"], capture_output=True, timeout=20,
+                           stdin=subprocess.DEVNULL)
+    except Exception as e:
+        sys.exit(f"{tool} could not be started: {e}")
+    if r.returncode != 0:
+        err = (r.stderr or b"").decode("utf-8", "replace").strip()
+        msg = [f"{tool} is installed but fails to run (exit {r.returncode})."]
+        if err:
+            msg.append("  " + err.splitlines()[0])
+        if "Library not loaded" in err or "dyld" in err:
+            msg += ["",
+                    "  A dynamic library is missing — a conda ffmpeg build with unmet",
+                    "  dependencies. Try, in order:",
+                    "    conda install -c conda-forge librsvg",
+                    "    conda install -c conda-forge --force-reinstall ffmpeg",
+                    "    conda remove --force ffmpeg && brew install ffmpeg"]
+        sys.exit("\n".join(msg))
 
 
 def probe_duration(path):
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=nw=1:nk=1", str(path)],
-        capture_output=True, text=True, check=True).stdout.strip()
+        capture_output=True, text=True, check=True,
+        stdin=subprocess.DEVNULL, timeout=120).stdout.strip()
     return float(out)
 
 
 def decode(path, sr, mono=True, start=None, dur=None):
-    """Decode to a numpy float32 array via ffmpeg. Returns (samples, channels)."""
+    """
+    Decode to a numpy float32 array via ffmpeg. Returns (samples, channels).
+
+    `-nostdin` matters: ffmpeg reads stdin for interactive keystrokes by default, and
+    when it inherits a terminal — which it does when you run this from a shell rather
+    than a pipeline — it can sit there waiting instead of decoding. The symptom is a
+    hang on the first file with no output at all.
+    """
     ch = 1 if mono else 2
-    cmd = ["ffmpeg", "-v", "error"]
+    cmd = ["ffmpeg", "-nostdin", "-v", "error"]
     if start is not None:
         cmd += ["-ss", f"{start:.4f}"]
     cmd += ["-i", str(path)]
     if dur is not None:
         cmd += ["-t", f"{dur:.4f}"]
     cmd += ["-ac", str(ch), "-ar", str(sr), "-f", "f32le", "-"]
-    raw = subprocess.run(cmd, capture_output=True, check=True).stdout
+    raw = subprocess.run(cmd, capture_output=True, check=True,
+                         stdin=subprocess.DEVNULL, timeout=600).stdout
     a = np.frombuffer(raw, dtype=np.float32)
     return a.reshape(-1, ch) if ch > 1 else a
 
@@ -164,8 +222,9 @@ def encode(y, sr, dest, channels):
     else:
         cmd += ["-codec:a", "libvorbis", "-q:a", "4"]
     cmd += [str(dest)]
+    # No -nostdin here: stdin IS the audio stream ("-i -").
     subprocess.run(cmd, input=y.astype(np.float32).tobytes(), check=True,
-                   capture_output=True)
+                   capture_output=True, timeout=600)
 
 
 def classify(stem):
@@ -180,7 +239,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="src", default=str(DEFAULT_IN))
     ap.add_argument("--out", dest="out", default=str(DEFAULT_OUT))
+    ap.add_argument("--audio-out", default=str(AUDIO_OUT),
+                    help="shared folder for processed audio (default %(default)s)")
+    ap.add_argument("--force", action="store_true",
+                    help="re-encode stems that already exist in the shared pool")
     ap.add_argument("--scene", default="hohe-tauern")
+    ap.add_argument("--pick", nargs="*", default=None,
+                    help="only these recordings (filenames or glob patterns). Without it "
+                         "EVERY file in --in becomes a layer, which for two dozen takes "
+                         "means two dozen loops playing at once.")
+    ap.add_argument("--labelled-only", action="store_true",
+                    help="use only recordings whose filename matches a hint (…_water, "
+                         "…_waterfall, …_footsteps). The fast way to a clean first mix.")
     ap.add_argument("--loop-seconds", type=float, default=20.0)
     ap.add_argument("--crossfade", type=float, default=2.0)
     ap.add_argument("--event-max-seconds", type=float, default=12.0,
@@ -191,19 +261,41 @@ def main():
     need("ffmpeg"); need("ffprobe")
 
     src = Path(args.src)
-    out_dir = Path(args.out) / args.scene
+    out_dir = Path(args.out) / args.scene          # scene.json lives here
+    audio_dir = Path(args.audio_out)               # the stems live here, shared
     out_dir.mkdir(parents=True, exist_ok=True)
+    audio_dir.mkdir(parents=True, exist_ok=True)
 
     wavs = sorted([p for p in src.iterdir()
-                   if p.suffix.lower() in (".wav", ".aiff", ".aif", ".flac", ".m4a")])
+                   if p.suffix.lower() in (".wav", ".aiff", ".aif", ".flac", ".m4a",
+                                           ".mp3", ".ogg", ".opus")])
+    if args.pick:
+        import fnmatch
+        chosen = []
+        for p_ in wavs:
+            if any(fnmatch.fnmatch(p_.name, pat) or p_.name == pat for pat in args.pick):
+                chosen.append(p_)
+        wavs = chosen
+    if args.labelled_only:
+        wavs = [p_ for p_ in wavs if classify(p_.stem)[0] is not None]
     if not wavs:
-        sys.exit(f"no recordings found in {src}")
+        sys.exit(f"no recordings selected in {src}")
+    if len(wavs) > 12 and not (args.pick or args.labelled_only):
+        print(f"note: {len(wavs)} recordings will become {len(wavs)} simultaneous layers.")
+        print("      Use --labelled-only, or --pick, to start with a mix you can hear.\n")
 
-    print(f"{len(wavs)} recordings -> {out_dir}\n")
+    print(f"{len(wavs)} recordings -> {rel(audio_dir)}  (scene: {args.scene})\n")
     layers, unlabelled, used_names = [], [], set()
 
+    skipped = []
     for path in wavs:
-        dur = probe_duration(path)
+        try:
+            dur = probe_duration(path)
+        except Exception as e:
+            skipped.append((path.name, f"unreadable ({type(e).__name__})"))
+            print(f"  {path.name:<28} SKIPPED — could not read duration")
+            continue
+        print(f"  {path.name:<28} {dur:6.1f}s  …", end="\r", flush=True)
         cls, geom = classify(path.stem)
         is_event = dur <= args.event_max_seconds
         name = cls or path.stem.lower().replace("_", "-")
@@ -216,30 +308,45 @@ def main():
                 k += 1
             name = f"{name}-{k}"
         used_names.add(name)
-        dest = out_dir / f"{name}.mp3"
+        dest = audio_dir / f"{name}.mp3"
+        reuse = dest.exists() and not args.force
 
-        if is_event:
-            y = decode(path, SR, mono=True)
-            y = normalise(y)
-            encode(y, SR, dest, 1)
-            if args.ogg:
-                encode(y, SR, dest.with_suffix(".ogg"), 1)
-            kind, extra = "event", dict(ratePerMin=6, jitter=0.7)
-            print(f"  {path.name:<28} {dur:6.1f}s  event    -> {dest.name}")
-        else:
-            mono = decode(path, ANALYSIS_SR, mono=True)
-            start = most_stationary_window(mono, ANALYSIS_SR, args.loop_seconds)
-            y = decode(path, SR, mono=False, start=start,
-                       dur=args.loop_seconds + args.crossfade)
-            y = loop_fold(normalise(y), SR, args.crossfade)
-            encode(y, SR, dest, 2)
-            if args.ogg:
-                encode(y, SR, dest.with_suffix(".ogg"), 2)
-            kind, extra = ("bed" if name in ("wind", "bed") else "region"), {}
-            print(f"  {path.name:<28} {dur:6.1f}s  loop @{start:6.1f}s -> {dest.name} "
-                  f"({dest.stat().st_size/1024:.0f} KB)")
+        try:
+            if reuse:
+                kind = ("event" if is_event else
+                        "bed" if name in ("wind", "bed") else "region")
+                extra = dict(ratePerMin=6, jitter=0.7) if is_event else {}
+                print(f"  {path.name:<28} {dur:6.1f}s  reused   -> {dest.name}")
+            elif is_event:
+                y = decode(path, SR, mono=True)
+                y = normalise(y)
+                encode(y, SR, dest, 1)
+                if args.ogg:
+                    encode(y, SR, dest.with_suffix(".ogg"), 1)
+                kind, extra = "event", dict(ratePerMin=6, jitter=0.7)
+                print(f"  {path.name:<28} {dur:6.1f}s  event    -> {dest.name}")
+            else:
+                mono = decode(path, ANALYSIS_SR, mono=True)
+                start = most_stationary_window(mono, ANALYSIS_SR, args.loop_seconds)
+                y = decode(path, SR, mono=False, start=start,
+                           dur=args.loop_seconds + args.crossfade)
+                y = loop_fold(normalise(y), SR, args.crossfade)
+                encode(y, SR, dest, 2)
+                if args.ogg:
+                    encode(y, SR, dest.with_suffix(".ogg"), 2)
+                kind, extra = ("bed" if name in ("wind", "bed") else "region"), {}
+                print(f"  {path.name:<28} {dur:6.1f}s  loop @{start:6.1f}s -> {dest.name} "
+                      f"({dest.stat().st_size/1024:.0f} KB)")
+        except Exception as e:
+            skipped.append((path.name, f"conversion failed ({type(e).__name__})"))
+            print(f"  {path.name:<28} {dur:6.1f}s  SKIPPED — conversion failed")
+            used_names.discard(name)
+            continue
 
-        layer = {"id": dest.stem, "type": kind, "src": dest.name}
+        # Relative from the scene folder to the shared pool, so it resolves the same
+        # whether the app is served from the repo root or anywhere else.
+        rel_src = os.path.relpath(dest, out_dir).replace(os.sep, "/")
+        layer = {"id": dest.stem, "type": kind, "src": rel_src}
         if geom:
             layer.update(geom)
         else:
@@ -249,6 +356,9 @@ def main():
         layer.update(extra)
         layers.append(layer)
 
+    if not layers:
+        sys.exit("\nNo recordings could be converted — nothing written. "
+                 "Check the errors above.")
     layers.sort(key=lambda l: {"bed": 0, "region": 1, "event": 2}[l["type"]])
 
     # Merge into an existing scene.json rather than replacing it: ingest_images.py may
@@ -287,9 +397,15 @@ def main():
     scene_path.write_text(json.dumps(scene, indent=2))
 
     print(f"\n{note} {rel(scene_path)}")
+    print(f"audio pool: {rel(audio_dir)} "
+          f"({len(list(audio_dir.glob('*.mp3')))} stem(s) shared across all scenes)")
     if "panorama" not in scene:
         print("  No panorama yet — run image_analysis/ingest_images.py with the same")
         print(f"  --scene {args.scene} and it will add one.")
+    if skipped:
+        print(f"\n{len(skipped)} file(s) skipped:")
+        for n, why in skipped:
+            print(f"  {n:<28} {why}")
     if unlabelled:
         print("\nTune these by ear — they had no filename hint, so they are all at az 0:")
         for u in unlabelled:

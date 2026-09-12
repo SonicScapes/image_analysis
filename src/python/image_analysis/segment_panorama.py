@@ -502,8 +502,13 @@ def as_percentages(shares, floor=1):
     return rows
 
 
-def write_class_report(rows, out_dir, panorama_file, mode):
-    path = out_dir / "scene_classes.txt"
+def class_report_name(source_name):
+    """<original image filename without extension>_classes.txt"""
+    return f"{Path(source_name).stem}_classes.txt"
+
+
+def write_class_report(rows, out_dir, panorama_file, mode, source_name=None):
+    path = out_dir / class_report_name(source_name or panorama_file)
     width = max((len(n) for n, _ in rows), default=8)
     lines = [
         f"# class coverage of {panorama_file} ({mode} pass)",
@@ -517,6 +522,41 @@ def write_class_report(rows, out_dir, panorama_file, mode):
     return path
 
 
+def sky_sanity(cells, gh, gw, names, hfov):
+    """
+    On a full sphere, roughly half of what you see is above the horizon and most of that
+    is sky. If the upper hemisphere comes back with almost no sky, the segmentation is
+    wrong — not slightly, but in a way that will place water sources overhead.
+
+    Returns a warning string, or None.
+    """
+    import numpy as np, math
+    if hfov < 350 or "sky" not in names:
+        return None                       # only meaningful for a full 360
+    sky_i = names.index("sky")
+    lat = (0.5 - (np.arange(gh) + 0.5) / gh) * math.pi
+    cell = (np.cos(lat) * (math.pi / gh) * (2 * math.pi / gw))[:, None] * np.ones((1, gw))
+    up = lat > 0
+    total = cell[up].sum()
+    if total <= 0:
+        return None
+    sky = cell[up][cells[up] == sky_i].sum()
+    share = 100 * sky / total
+    if share >= 20:
+        return None
+    worst = {}
+    for i, n in enumerate(names):
+        w = cell[up][cells[up] == i].sum()
+        if w > 0:
+            worst[n] = 100 * w / total
+    top = sorted(worst.items(), key=lambda t: -t[1])[:2]
+    return (f"only {share:.0f}% of the sky is labelled 'sky' — mostly "
+            + ", ".join(f"{n} {v:.0f}%" for n, v in top)
+            + ".\n  A full 360 is about half sky. This segmentation is wrong. Re-run with"
+              "\n  --mode multiview and a larger model (the B4 default), not the smoke-test"
+              "\n  settings: a small model on a raw equirect reads cloud as rock or water.")
+
+
 PALETTE = {
     "sky": (110, 165, 200), "forest": (48, 92, 58), "pasture": (140, 176, 92),
     "rock": (140, 134, 126), "scree": (176, 168, 150), "water": (60, 130, 168),
@@ -525,6 +565,91 @@ PALETTE = {
     "cattle": (214, 122, 70), "cablecar": (120, 100, 140),
     "person": (232, 72, 96),
 }
+
+
+def _load_font(size):
+    """A real font if the OS has one, PIL's bitmap font otherwise."""
+    from PIL import ImageFont
+    for cand in ("/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                 "/System/Library/Fonts/Helvetica.ttc",
+                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(cand, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=size)      # Pillow >= 10.1
+    except Exception:
+        return ImageFont.load_default()
+
+
+def direction_to_pixel(az, el, w, h, projection, hfov, vfov):
+    """
+    Where a direction lands in the SOURCE image. Returns (x, y) or None if it is behind
+    the camera. Each projection maps differently, and azimuth 0 is the image centre.
+    """
+    lon = ((az + 180.0) % 360.0) - 180.0
+    if projection == "equirect":
+        return (lon / 360.0 + 0.5) * w, (0.5 - el / 180.0) * h
+    if projection == "cylindrical":
+        return (lon / hfov + 0.5) * w, (0.5 - el / vfov) * h
+    # flat: gnomonic, the inverse of flat_view's pinhole model
+    lo, la = math.radians(lon), math.radians(el)
+    X = math.cos(la) * math.sin(lo)
+    Y = math.sin(la)
+    Z = math.cos(la) * math.cos(lo)
+    if Z <= 1e-6:
+        return None
+    f = (w / 2) / math.tan(math.radians(hfov) / 2)
+    return w / 2 + f * (X / Z), h / 2 - f * (Y / Z)
+
+
+def write_labeled_overlay(base, regions, shares, out_dir, projection, hfov, vfov,
+                          max_labels=12):
+    """
+    overlay.png with the class names written on the regions themselves. This is the image
+    that makes the pipeline legible to someone who has never seen the code: they can look
+    at one picture and check whether 'waterfall' is really on a waterfall.
+    """
+    from PIL import ImageDraw
+    img = Image.fromarray(base[..., :3] if base.ndim == 3 and base.shape[2] == 4 else base)
+    w, h = img.size
+    draw = ImageDraw.Draw(img, "RGBA")
+    size = max(14, int(w / 70))
+    font = _load_font(size)
+    pct = dict(shares)
+
+    for r in sorted(regions, key=lambda r: -r["solid_angle_sr"])[:max_labels]:
+        pos = direction_to_pixel(r["az"], r["el"], w, h, projection, hfov, vfov)
+        if pos is None:
+            continue
+        x, y = pos
+        if not (-w < x < 2 * w and 0 <= y <= h):
+            continue
+        x = min(max(x, size), w - size)
+        y = min(max(y, size), h - size)
+
+        colour = PALETTE.get(r["class"], (200, 200, 200))
+        share = pct.get(r["class"])
+        text = r["id"] if share is None else f"{r['id']}  {share}%"
+        text += f"\n{r['distance']} m"
+
+        box = draw.multiline_textbbox((x, y), text, font=font, anchor="mm", spacing=2)
+        pad = size * 0.35
+        draw.rounded_rectangle(
+            [box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad],
+            radius=size * 0.3, fill=(8, 12, 11, 205), outline=colour + (255,),
+            width=max(2, size // 12))
+        draw.multiline_text((x, y), text, font=font, fill=(240, 246, 242, 255),
+                            anchor="mm", align="center", spacing=2)
+        # A dot marks the exact centroid, since the label is nudged to stay on canvas.
+        rr = max(3, size // 6)
+        draw.ellipse([x - rr, y - rr, x + rr, y + rr], fill=colour + (255,))
+
+    dest = out_dir / "overlay_labeled.png"
+    img.save(dest)
+    return dest
 
 
 def write_pngs(labels, class_order, erp, out_dir, grid_w, grid_h, lonlat=None):
@@ -556,6 +681,7 @@ def write_pngs(labels, class_order, erp, out_dir, grid_w, grid_h, lonlat=None):
         big = lab_rgb[gy, gx].astype(np.float32)
     blend = (0.62 * base.astype(np.float32) + 0.38 * big).astype(np.uint8)
     Image.fromarray(blend).save(out_dir / "overlay.png")
+    return blend
 
 
 # ---------------------------------------------------------------------------
@@ -599,11 +725,15 @@ def main():
     src_img = np.array(Image.open(args.panorama).convert("RGB"))
 
     projection, hfov, vfov = args.projection, args.hfov, args.vfov
+    source_name = Path(args.panorama).name
     if args.scene_json:
         pano = json.loads(Path(args.scene_json).read_text()).get("panorama", {})
         projection = projection or pano.get("projection")
         hfov = hfov if hfov is not None else pano.get("hfov_deg")
         vfov = vfov if vfov is not None else pano.get("vfov_deg")
+        # ingest_images.py renames every image to panorama.jpg but records where it
+        # came from, so the report can carry the name you actually recognise.
+        source_name = pano.get("source", source_name)
     if projection is None:
         h0, w0 = src_img.shape[:2]
         projection = "equirect" if abs(w0 / h0 - 2) < 0.06 else "cylindrical"
@@ -715,11 +845,16 @@ def main():
     if flat:
         _, lon_f, lat_f = flat_view(erp, hfov, vfov)
         overlay_lonlat = (lon_f, lat_f)
-    write_pngs(labels_hi, class_order, erp, out_dir, GW, GH, overlay_lonlat)
+    blended = write_pngs(labels_hi, class_order, erp, out_dir, GW, GH, overlay_lonlat)
+
+    warn = sky_sanity(labels_lo, gh, gw, class_order, hfov)
+    if warn:
+        print(f"\n!! {warn}\n")
 
     shares = class_shares(acc, valid_hi, class_order)
     rows = as_percentages(shares)
-    classes_path = write_class_report(rows, out_dir, Path(args.panorama).name, args.mode)
+    classes_path = write_class_report(rows, out_dir, Path(args.panorama).name,
+                                      args.mode, source_name)
 
     # Carry forward everything ingest_images.py established about this place. Losing
     # north_offset_deg here would silently turn real compass bearings back into offsets
@@ -788,8 +923,10 @@ def main():
     if any(human.values()):
         print(f"\nvisibly human: " + ", ".join(f"{k} {v}%" for k, v in human.items() if v)
               + f" -> starting pressure {manifest['scene']['pressure']}")
+    labeled = write_labeled_overlay(blended, regions, rows, out_dir,
+                                    projection, hfov, vfov)
     print(f"\nwrote {out_dir}/scene.segmented.json, {classes_path.name},")
-    print("      labels.png, overlay.png")
+    print(f"      labels.png, overlay.png, {labeled.name}")
     print("Next: fill the `src` files (fetch-sounds.mjs uses the `query` fields),")
     print("then load scene.segmented.json in demo.html.")
 

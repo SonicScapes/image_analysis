@@ -23,6 +23,9 @@ const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const fail = (msg) => { const e = $('err'); e.innerHTML = msg; e.style.display = 'block'; };
 
+// Tells the inline boot-check in index.html that the module got this far.
+window.__soundscapesReady = true;
+
 const stage = $('stage');
 const strip = $('strip');
 const engine = new SoundscapeEngine();
@@ -134,23 +137,33 @@ if (typeof DeviceOrientationEvent !== 'undefined' && 'ontouchstart' in window) {
 
 /* --------------------------------------------------------------------- start */
 
-$('startBtn').addEventListener('click', async () => {
-  const btn = $('startBtn');
-  btn.disabled = true;
+/**
+ * Boot the scene. `silent` skips all audio: no AudioContext, no downloads, no graph —
+ * but geometry, visibility, meters and compass all still run, which is what you want
+ * when checking whether a region is pointing where you think it is.
+ */
+async function boot(silent) {
+  const btn = silent ? $('exploreBtn') : $('startBtn');
+  $('startBtn').disabled = true;
+  $('exploreBtn').disabled = true;
   try {
     $('status').textContent = 'loading…';
     scene = await (await fetch(SCENE_URL)).json();
     pano = scene.panorama;
     if (!pano) throw new Error('scene.json has no "panorama" block — run ingest_images.py');
-    if (!scene.layers?.length) throw new Error('scene.json has no layers — run prepare_audio.py');
+    if (!silent && !scene.layers?.length) {
+      throw new Error('scene.json has no layers — run prepare_audio.py');
+    }
     pano.vfov_deg = pano.vfov_deg ?? pano.hfov_deg / 2;
 
     await loadImage(BASE_URL + pano.file);
-    await engine.loadScene(scene, {
+    await engine.loadScene({ ...scene, layers: scene.layers ?? [] }, {
       baseUrl: BASE_URL,
+      silent,
       onProgress: (d, t) => { $('status').textContent = `loading sounds… ${d}/${t}`; },
     });
     await engine.start();
+    $('silentBadge').hidden = !silent;
 
     // Open looking at the middle of the image, not at its left edge.
     const m = maxPan();
@@ -165,14 +178,77 @@ $('startBtn').addEventListener('click', async () => {
     buildRows();
     for (const el of ['title', 'meters', 'compass', 'controls']) $(el).hidden = false;
     $('gate').style.display = 'none';
+    await detectSources();
     frame();
   } catch (err) {
-    btn.disabled = false;
-    $('status').textContent = 'headphones required';
-    fail(`${err.message}<br>Serve the repo root over http (<code>npm run dev</code>) — ` +
-         `ES modules and fetch don't work from file://`);
+    $('startBtn').disabled = false;
+    $('exploreBtn').disabled = false;
+    $('status').textContent = err.message;
+    const hint = /no layers/.test(err.message)
+      ? 'Run:  python src/python/audio_prep/prepare_audio.py --scene ' +
+        (SCENE_URL.split('/').slice(-2, -1)[0] || 'hohe-tauern') + ' --labelled-only'
+      : /could not load|Failed to fetch|NetworkError/.test(err.message)
+        ? 'Serve the repo ROOT over http (npm run dev), not the app folder, and not file://'
+        : 'Check the console (Cmd+Opt+J) for the full trace.';
+    fail(`<b>${err.message}</b><br>${hint}`);
+    console.error('[soundscapes]', err);
   }
-});
+}
+
+$('startBtn').addEventListener('click', () => boot(false));
+$('exploreBtn').addEventListener('click', () => boot(true));
+
+/* ------------------------------------------------- displayed image switcher */
+
+const SOURCES = {
+  srcPhoto:   { file: () => pano.file, label: 'the photograph' },
+  srcOverlay: { file: () => 'overlay.png', label: 'segmentation painted over the photo' },
+  srcNamed:   { file: () => 'overlay_labeled.png', label: 'overlay with class names' },
+  srcLabels:  { file: () => 'labels.png', label: 'the raw sphere label map' },
+};
+let currentSource = 'srcPhoto';
+
+async function detectSources() {
+  for (const id of Object.keys(SOURCES)) {
+    if (id === 'srcPhoto') continue;
+    try {
+      const r = await fetch(BASE_URL + SOURCES[id].file(), { method: 'HEAD' });
+      $(id).disabled = !r.ok;
+      if (!r.ok) $(id).title = 'not generated yet — run segment_panorama.py';
+    } catch {
+      $(id).disabled = true;
+    }
+  }
+}
+
+async function setSource(id) {
+  if ($(id).disabled || id === currentSource) return;
+  const prevAspect = img.w / img.h;
+  try {
+    strip.innerHTML = '';
+    await loadImage(BASE_URL + SOURCES[id].file());
+  } catch (err) {
+    fail(`Could not load ${SOURCES[id].file()} — ${err.message}`);
+    return;
+  }
+  currentSource = id;
+  for (const k of Object.keys(SOURCES)) $(k).setAttribute('aria-pressed', String(k === id));
+
+  // A label map is a full sphere at 2:1. Over a flat photo or a partial sweep that is a
+  // different shape from the picture, so say so rather than letting it look misaligned.
+  const note = $('srcNote');
+  const aspect = img.w / img.h;
+  if (id !== 'srcPhoto' && Math.abs(aspect - prevAspect) > 0.05) {
+    note.textContent = 'full sphere — does not line up with this photo';
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+  }
+}
+
+for (const id of Object.keys(SOURCES)) {
+  $(id).addEventListener('click', () => setSource(id));
+}
 
 function loadImage(url) {
   return new Promise((resolve, reject) => {
@@ -232,7 +308,7 @@ function drawCompass(debug, view) {
     if (l.type === 'bed' || l.type === 'score') continue;
     const a = (l.az - 90) * Math.PI / 180;
     const r = 20 + Math.min(l.distance, 500) / 500 * 30;
-    const fresh = engine.ctx && engine.ctx.currentTime - l.lastEventAt < 0.6;
+    const fresh = engine.now() - l.lastEventAt < 0.6;
     const col = l.type === 'event' ? '#E09257' : '#58B9BE';
     const rad = 2 + l.visibility * 3.2 + (fresh ? 3 : 0);
     svg += `<circle cx="${(66 + Math.cos(a) * r).toFixed(1)}" cy="${(66 + Math.sin(a) * r).toFixed(1)}"` +
@@ -256,7 +332,7 @@ function frame() {
     el.db.textContent = l.type === 'event'
       ? (l.visibility * 100).toFixed(0) + '%'
       : l.gainDb.toFixed(0);
-    el.row.classList.toggle('fired', engine.ctx.currentTime - l.lastEventAt < 0.5);
+    el.row.classList.toggle('fired', engine.now() - l.lastEventAt < 0.5);
   }
   drawCompass(debug, view);
   $('bearing').textContent = Math.round(view.yaw) + '°';

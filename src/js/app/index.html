@@ -78,6 +78,30 @@
     text-align: right; font-variant-numeric: tabular-nums; }
   .row.fired .lbl { color: var(--amber); }
 
+  .seg { display: flex; gap: 1px; margin-top: .55rem; background: var(--line);
+         border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+  .seg button {
+    flex: 1; font-family: "IBM Plex Mono", monospace; font-size: .62rem; letter-spacing: .08em;
+    text-transform: uppercase; padding: .4rem .3rem; border: none; cursor: pointer;
+    background: rgba(11,17,16,.9); color: var(--muted);
+  }
+  .seg button[aria-pressed="true"] { background: var(--teal); color: #06100F; }
+  .seg button:disabled { opacity: .35; cursor: not-allowed; }
+  .seg button:hover:not(:disabled):not([aria-pressed="true"]) { color: var(--ink); }
+
+  #silentBadge { display: inline-block; font-family: "IBM Plex Mono", monospace;
+    font-size: .58rem; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--amber); border: 1px solid var(--amber); border-radius: 2px;
+    padding: .08rem .3rem; margin-left: .4rem; }
+
+  button.ghost {
+    font-family: "IBM Plex Mono", monospace; font-size: .72rem; letter-spacing: .12em;
+    text-transform: uppercase; padding: .6rem 1.2rem; border-radius: 999px;
+    cursor: pointer; background: transparent; color: var(--muted);
+    border: 1px solid var(--line);
+  }
+  button.ghost:hover { color: var(--teal); border-color: var(--teal); }
+
   #compass { left: 16px; bottom: 16px; }
   #controls { right: 16px; bottom: 16px; padding: .85rem .95rem; display: grid; gap: .75rem; width: 16rem; }
   #controls label { font-family: "IBM Plex Mono", monospace; font-size: .64rem; letter-spacing: .1em;
@@ -108,8 +132,15 @@
 <div id="vignette"></div>
 
 <div id="title" class="hud" hidden>
-  <div class="n" id="poiName">—</div>
+  <div class="n"><span id="poiName">—</span><span id="silentBadge" hidden>silent</span></div>
   <div class="s">bearing <span id="bearing">0°</span> · <span id="fovOut">0°</span> field of view</div>
+  <div class="seg" id="sourceSwitch" role="group" aria-label="Displayed image">
+    <button id="srcPhoto"   aria-pressed="true">Photo</button>
+    <button id="srcOverlay" aria-pressed="false">Overlay</button>
+    <button id="srcNamed"   aria-pressed="false">Named</button>
+    <button id="srcLabels"  aria-pressed="false">Labels</button>
+  </div>
+  <div class="s" id="srcNote" hidden></div>
 </div>
 
 <div id="meters" class="hud" hidden>
@@ -143,12 +174,49 @@
     <h1 id="gateTitle">Hohe Tauern</h1>
     <p>Put on headphones and look around. What you turn towards is what you hear — mixed live from recordings made at this spot.</p>
     <button class="primary" id="startBtn">Listen</button>
+    <button class="ghost" id="exploreBtn">Explore without sound</button>
     <p class="hint" id="status">headphones required</p>
   </div>
 </div>
 
 <div id="err"></div>
 
+<script>
+  // Runs BEFORE the module, and plainly, so it works even if the module never loads.
+  // A button that does nothing almost always means app.js threw while loading and the
+  // click handler was never attached — a failure the page would otherwise keep to itself.
+  (function () {
+    var box = document.getElementById('err');
+    var shown = false;
+    function show(what, detail) {
+      shown = true;
+      box.innerHTML = '<b>' + what + '</b><br>' + detail +
+        '<br><br>Open the console (Cmd+Opt+J) for the full trace.';
+      box.style.display = 'block';
+      var st = document.getElementById('status');
+      if (st) st.textContent = what;
+    }
+    window.addEventListener('error', function (e) {
+      if (e.message === 'Script error.' && !e.filename) return;
+      show('Script error', (e.message || 'unknown') +
+           (e.filename ? '<br>' + e.filename + ':' + e.lineno : ''));
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      show('Unhandled promise rejection', (e.reason && e.reason.message) || e.reason);
+    });
+    // If the module never signals that it booted, say so rather than sitting mute.
+    window.addEventListener('load', function () {
+      setTimeout(function () {
+        if (!window.__soundscapesReady && !shown) {
+          show('app.js did not load',
+               'The module failed before it could attach the Listen button. Usually a ' +
+               '404 on ../engine/soundscape-engine.js, or a syntax error. Check the ' +
+               'Network and Console tabs.');
+        }
+      }, 1500);
+    });
+  })();
+</script>
 <script type="module" src="./app.js"></script>
 </body>
 </html>

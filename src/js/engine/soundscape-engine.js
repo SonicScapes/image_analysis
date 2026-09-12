@@ -28,6 +28,21 @@ const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const dbToGain = (db) => Math.pow(10, db / 20);
 const lerp = (a, b, t) => a + (b - a) * t;
 
+/**
+ * Resolve a layer's `src` against the scene's folder. Audio lives in one shared pool
+ * (data/audio/) rather than being copied into every scene, so `src` is usually something
+ * like "../../audio/water.mp3" — which string concatenation would mangle and URL
+ * resolution handles correctly. Absolute paths and full URLs pass through untouched.
+ */
+function resolveSrc(src, baseUrl) {
+  try {
+    const base = new URL(baseUrl || './', window.location.href);
+    return new URL(src, base).href;
+  } catch {
+    return (baseUrl || '') + src;      // non-browser contexts (tests)
+  }
+}
+
 function smoothstep(edge0, edge1, x) {
   const t = clamp((x - edge0) / (edge1 - edge0 || 1e-9), 0, 1);
   return t * t * (3 - 2 * t);
@@ -91,6 +106,10 @@ export class SoundscapeEngine {
 
     this.masterGainDb = opts.masterGainDb ?? 0;
     this.running = false;
+    // Silent mode: geometry only. No AudioContext, no downloads, no graph — but
+    // visibility, panning and the event scheduler all still run, so the meters and the
+    // compass work. This is the mode for checking where you put things.
+    this.silent = false;
     this._raf = null;
     this._lastUpdate = 0;
     this._updateHz = opts.updateHz ?? 20;
@@ -106,11 +125,13 @@ export class SoundscapeEngine {
    */
   async loadScene(manifest, opts = {}) {
     const baseUrl = opts.baseUrl ?? '';
+    this.silent = !!opts.silent;
+    if (this.silent) return this._loadSceneSilent(manifest, baseUrl);
     this._ensureContext();
 
     const srcs = new Set();
     for (const l of manifest.layers) {
-      for (const s of [].concat(l.src)) srcs.add(baseUrl + s);
+      for (const s of [].concat(l.src)) srcs.add(resolveSrc(s, baseUrl));
     }
 
     let done = 0;
@@ -143,8 +164,44 @@ export class SoundscapeEngine {
     return this;
   }
 
+  /** Geometry-only load: no audio fetched, no graph built. */
+  _loadSceneSilent(manifest, baseUrl) {
+    this.scene = { ...manifest, baseUrl };
+    if (manifest.scene) {
+      this.mood = {
+        scenicness: manifest.scene.scenicness ?? this.mood.scenicness,
+        eventfulness: manifest.scene.eventfulness ?? this.mood.eventfulness,
+      };
+      if (manifest.scene.pressure != null) {
+        this.pressure = clamp(manifest.scene.pressure, 0, 10) / 10;
+      }
+    }
+    this.layers = manifest.layers.map((raw) => ({
+      ...LAYER_DEFAULTS, ...raw, vis: 0, currentDb: -120, lastEventAt: 0,
+    }));
+    return this;
+  }
+
+  /** Seconds on whichever clock we have — there is no AudioContext in silent mode. */
+  now() {
+    return this._now();
+  }
+
+  _now() {
+    return this.ctx ? this.ctx.currentTime : performance.now() / 1000;
+  }
+
   /** Resume the AudioContext and start playback. Call from a click/tap handler. */
   async start() {
+    if (this.silent) {
+      if (this.running) return this;
+      this.running = true;
+      for (const layer of this.layers) {
+        if (layer.type === 'event') this._scheduleEvent(layer);
+      }
+      this._tick();
+      return this;
+    }
     this._ensureContext();
     if (this.ctx.state === 'suspended') await this.ctx.resume();
     if (this.running) return this;
@@ -172,6 +229,11 @@ export class SoundscapeEngine {
   async stop(fadeSeconds = 0.6) {
     if (!this.running) return;
     this.running = false;
+    if (this.silent) {
+      for (const l of this.layers) if (l.timer) clearTimeout(l.timer);
+      cancelAnimationFrame(this._raf);
+      return;
+    }
     const t = this.ctx.currentTime;
     this.master.gain.setTargetAtTime(0.0001, t, fadeSeconds / 3);
     await new Promise((r) => setTimeout(r, fadeSeconds * 1000));
@@ -186,6 +248,7 @@ export class SoundscapeEngine {
   /** Master level in dB, for ducking under a voiceover or a UI moment. */
   setMasterGain(db, seconds = 0.3) {
     this.masterGainDb = db;
+    if (this.silent || !this.ctx) return;
     this.master?.gain.setTargetAtTime(dbToGain(db), this.ctx.currentTime, seconds / 3);
   }
 
@@ -349,7 +412,7 @@ export class SoundscapeEngine {
   _buildGraph() {
     this.layers = this.scene.layers.map((raw) => {
       const l = { ...LAYER_DEFAULTS, ...raw };
-      l.srcList = [].concat(l.src).map((s) => this.scene.baseUrl + s);
+      l.srcList = [].concat(l.src).map((s) => resolveSrc(s, this.scene.baseUrl));
       l.buffer = this.buffers.get(l.srcList[0]);
 
       // Per-layer chain: input -> airLP -> [panner | direct] -> gain -> master
@@ -433,7 +496,16 @@ export class SoundscapeEngine {
     if (now - this._lastUpdate < 1000 / this._updateHz) return;
     this._lastUpdate = now;
 
-    const t = this.ctx.currentTime;
+    const t = this._now();
+
+    if (this.silent) {
+      for (const layer of this.layers) {
+        layer.vis = layer.type === 'bed' || layer.type === 'score'
+          ? 1 : this._visibility(layer);
+        layer.currentDb = this._layerDb(layer, layer.vis);
+      }
+      return;
+    }
 
     // Listener follows the camera; sources stay put in world space.
     const f = sphericalToVec(this.view.yaw, this.view.pitch);
@@ -478,7 +550,7 @@ export class SoundscapeEngine {
   }
 
   _eventActivity() {
-    const now = this.ctx.currentTime;
+    const now = this._now();
     let a = 0;
     for (const l of this.layers) {
       if (l.type === 'event' && l.lastEventAt && now - l.lastEventAt < 1.5) a += 0.5;
@@ -506,6 +578,12 @@ export class SoundscapeEngine {
 
   _fireEvent(layer) {
     if (!this.running) return;
+    if (this.silent) {
+      // No sound, but record the trigger so the meters and compass still blink.
+      layer.lastEventAt = this._now();
+      layer.lastEventAz = layer.az + (Math.random() * 2 - 1) * layer.spread;
+      return;
+    }
     const url = layer.srcList[(Math.random() * layer.srcList.length) | 0];
     const buffer = this.buffers.get(url);
     if (!buffer) return;
@@ -547,6 +625,15 @@ export class SoundscapeEngine {
   }
 
   _applyMood() {
+    if (this.silent) {
+      // Keep the numbers current so the meters reflect the sliders.
+      const s2 = this.mood.scenicness / 10;
+      for (const l of this.layers) {
+        if (l.tags?.includes('wind')) l.gain = lerp(-3, -14, s2);
+        if (l.type === 'score') l.gain = lerp(-30, -24, s2);
+      }
+      return;
+    }
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
     const s = this.mood.scenicness / 10; // 0 austere .. 1 pleasant

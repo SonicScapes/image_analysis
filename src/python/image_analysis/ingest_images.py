@@ -34,7 +34,7 @@ EXIF also gives us, for free:
 Needs: pillow, pillow-heif (for HEIC). numpy only for the fisheye check.
 """
 
-import argparse, json, math, re, sys
+import argparse, json, math, re, sys, time
 from pathlib import Path
 
 import numpy as np
@@ -61,6 +61,12 @@ JPEG_QUALITY = 84
 SENSOR_MM = 36.0  # 35 mm equivalent frame width
 
 
+def slug(name):
+    """Folder-and-URL-safe version of a filename stem. Scene ids end up in URLs."""
+    out = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
+    return out or "scene"
+
+
 def rel(p):
     """Path relative to the repo when it is inside it, absolute otherwise."""
     try:
@@ -77,7 +83,10 @@ def read_gpano(path):
     when it is present we don't guess anything.
     """
     try:
-        blob = path.read_bytes()[:2_000_000]
+        # Bounded read. read_bytes()[:N] pulls the entire file first, which on a 35 MB
+        # panorama — or anything living on a synced/remote volume — is the slow part.
+        with open(path, "rb") as fh:
+            blob = fh.read(2_000_000)
     except OSError:
         return {}
     text = blob.decode("latin-1", errors="ignore")
@@ -320,7 +329,17 @@ def main():
                     help="override the compass bearing of the image CENTRE")
     ap.add_argument("--each", action="store_true",
                     help="treat every input image as its own point of interest and write "
-                         "one scene folder per image, named <scene>-1, <scene>-2, ...")
+                         "one scene folder per image, NAMED AFTER THE INPUT FILE "
+                         "(IMG_1234.jpg -> data/scenes/IMG_1234/)")
+    ap.add_argument("--redo", action="store_true",
+                    help="re-ingest images whose scene has already been segmented. "
+                         "Without it they are skipped, since re-converting a panorama "
+                         "that is already done is pure cost.")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="only the first N images, in sorted filename order")
+    ap.add_argument("--number", action="store_true",
+                    help="with --each, name folders <scene>-1, <scene>-2 ... instead of "
+                         "after the input file")
     ap.add_argument("--catalog", action="store_true",
                     help="survey every image (position, altitude, bearing, field of view), "
                          "group them into candidate points of interest, write a CSV, and "
@@ -337,8 +356,30 @@ def main():
     exts = (".jpg", ".jpeg", ".png", ".heic", ".heif", ".insp", ".insv", ".dng", ".tif")
     files = ([src / p for p in args.pick] if args.pick else
              sorted(p for p in src.iterdir() if p.suffix.lower() in exts))
+    if args.limit is not None:
+        files = files[:args.limit]
     if not files:
         sys.exit(f"no images found in {src}")
+
+    # Skip anything already segmented. The scene id comes from the filename, so this
+    # costs nothing — no need to open the image to find out we don't want it.
+    skipped_done = []
+    if not args.redo:
+        kept = []
+        for f in files:
+            scene_id = slug(f.stem) if args.each else args.scene
+            if (Path(args.out) / scene_id / "scene.segmented.json").exists():
+                skipped_done.append(scene_id)
+            else:
+                kept.append(f)
+        files = kept
+    if skipped_done:
+        print(f"skipping {len(skipped_done)} already segmented: "
+              + ", ".join(skipped_done[:4])
+              + (f" … (+{len(skipped_done) - 4})" if len(skipped_done) > 4 else "")
+              + "   [--redo to force]\n")
+    if not files:
+        sys.exit("nothing left to do — every image is already segmented.")
 
     views, failures = [], []
     print(f"{len(files)} image(s) from {src}\n")
@@ -348,11 +389,14 @@ def main():
         if path.suffix.lower() in (".heic", ".heif") and not HEIC_OK:
             failures.append((path.name, "HEIC support missing — pip install pillow-heif"))
             continue
+        print(f"  {path.name:<26} reading …", end="\r", flush=True)
+        t0 = time.time()
         try:
             img = Image.open(path)
             img.load()
         except Exception as e:
             failures.append((path.name, str(e)))
+            print(f"  {path.name:<26} FAILED — {e}")
             continue
 
         v = classify(path, img)
@@ -362,7 +406,12 @@ def main():
         bearing = f"{v['heading']:.0f}deg" if "heading" in v else "—"
         alt = f"{v['elev_m']:.0f}m" if "elev_m" in v else "—"
         print(f"  {path.name:<26} {v['projection']:<12} {v['hfov_deg']:>5.0f}deg "
-              f"{bearing:>8} {alt:>7}  {v['how']}")
+              f"{bearing:>8} {alt:>7}  {v['how']}  [{time.time() - t0:.1f}s]")
+        if time.time() - t0 > 5:
+            print("      ^ that took a while. If resources/ is a symlink into Dropbox, "
+                  "iCloud or a network\n        volume, the first read has to download "
+                  "the file. Make the folder available\n        offline, or copy the "
+                  "panoramas to a local disk first.")
 
         if v["projection"] == "dual_fisheye":
             failures.append((path.name,
@@ -424,12 +473,21 @@ def main():
     # ---------------------------------------------------------------- one scene each
     if args.each:
         print()
+        ids = []
         for n, v in enumerate(views, 1):
-            scene_id = f"{args.scene}-{n}"
+            scene_id = (f"{args.scene}-{n}" if args.number
+                        else slug(Path(v["source"]).stem))
+            ids.append(scene_id)
             build_scene(v, Path(args.out) / scene_id, scene_id, args.name)
         print(f"\n{len(views)} scene(s) written under {rel(Path(args.out))}")
-        print("Give each one audio with:")
-        print(f"  python src/python/audio_prep/prepare_audio.py --scene {args.scene}-1")
+        print("\nSegment them all:")
+        print("  for d in " + " ".join(f"data/scenes/{i}" for i in ids[:3])
+              + (" ..." if len(ids) > 3 else "") + "; do")
+        print("    python src/python/image_analysis/segment_panorama.py \\")
+        print('        "$d/panorama.jpg" --out "$d" --scene-json "$d/scene.json" --open-vocab')
+        print("  done")
+        print(f"\nThen give one audio:  python src/python/audio_prep/prepare_audio.py "
+              f"--scene {ids[0]} --labelled-only")
         if failures:
             print()
             for name, why in failures:

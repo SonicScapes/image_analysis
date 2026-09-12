@@ -118,9 +118,11 @@ habit: sphere geometry fails quietly and sounds wrong rather than crashing.
 ## Outputs
 
 ```
-data/scenes/<id>/scene.segmented.json   engine-ready geometry
-data/scenes/<id>/labels.png             the sphere label map
-data/scenes/<id>/overlay.png            the photo with segmentation painted over it
+data/scenes/<id>/scene.segmented.json     engine-ready geometry
+data/scenes/<id>/<image>_classes.txt      class coverage, named after the source image
+data/scenes/<id>/labels.png               the sphere label map
+data/scenes/<id>/overlay.png              the photo with segmentation painted over it
+data/scenes/<id>/overlay_labeled.png      the same, with class names written on the regions
 ```
 
 `overlay.png` is the pitch asset: one image proving the sound placement is derived from

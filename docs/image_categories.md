@@ -85,9 +85,11 @@ deliberate: one hiker in frame changes how a place feels far more than their 1 %
 pixels suggests. If there are people in the picture, the place already has people in it,
 and pretending otherwise is the kind of flattery this project is supposed to avoid.
 
-## `scene_classes.txt`
+## `<image>_classes.txt`
 
-Written next to `scene.json` on every segmentation run, and mirrored into
+Written next to `scene.json` on every segmentation run, named after the source image
+(`IMG_1234.jpg` -> `IMG_1234_classes.txt`), so a report is identifiable once it leaves
+its folder, and mirrored into
 `scene.segmented.json` under `classes` so code needn't parse the text.
 
 ```
@@ -129,14 +131,16 @@ Say you want `bog` — the Hohe Tauern has plenty, and it sounds distinctive.
 4. **Colour it.** Add `PALETTE["bog"]` so it is distinguishable in `overlay.png`. Pick
    something no neighbouring class already uses, or the pitch image gets harder to read.
 
-Steps 1 and 4 are the minimum to make it appear in `scene_classes.txt`. Without step 2 it
+Steps 1 and 4 are the minimum to make it appear in the class report. Without step 2 it
 is seen and reported but never sounds.
 
 ## The audio side has its own tags
 
 Separate from these categories, layers carry `tags` that drive the mixer's macro
-controls. They are assigned in `prepare_audio.py`'s `HINTS` table, keyed off the recording
-filename, not off image segmentation:
+controls. They are assigned in `prepare_audio.py`'s `HINTS` table, keyed off the audio
+filename, not off image segmentation. That table matches both our own naming
+(`..._waterfall.WAV`) and the class names Freesound downloads use (`rock-1.mp3`), so a
+gap-filler lands positioned and tagged without extra work:
 
 | Tag | Effect |
 | --- | --- |

@@ -63,6 +63,12 @@ distance in metres. Four kinds:
 `data/scenes/<id>/scene.json` holds both geometries and is the only contract between the
 Python pipeline and the JavaScript runtime.
 
+Audio itself lives in one shared pool, `data/audio/`, not inside the scenes. Nothing is
+mixed down per scene — the engine applies gain, panning, filtering and distance live from
+the manifest, and `prepare_audio.py` normalises every stem to one level so those numbers
+transfer between scenes. So a stem is scene-independent by construction, and five scenes
+sharing a wind bed share one file.
+
 ## Runtime, per frame
 
 1. **Visibility** — elliptical frustum test per layer against its angular disc, `0…1`.
