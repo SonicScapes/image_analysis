@@ -1,0 +1,31 @@
+# Dedicated environment for SoundScapes.
+#
+#   conda env create -f environment.yml
+#   conda activate soundscapes
+#
+# Why its own environment: the segmentation step needs torch and opencv, both of which
+# require numpy >= 2. Any environment with packages pinned to numpy 1.26.4 cannot host
+# both, and the loser is whichever one you installed first.
+#
+# conda provides the interpreter and ffmpeg (so no brew dependency); pip provides the
+# rest, because torch and pillow-heif ship better wheels than conda builds on Apple
+# Silicon. Mixing the two for numpy itself is what causes trouble, so numpy comes from
+# pip only.
+name: soundscapes
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - ffmpeg               # prepare_audio.py shells out to ffmpeg + ffprobe
+  - pip
+  - pip:
+      # core — ingest_images.py, prepare_audio.py
+      - numpy>=2
+      - pillow>=10.0
+      - pillow-heif>=0.16
+      # segmentation — segment_panorama.py
+      - opencv-python>=4.9
+      - scipy>=1.11
+      - torch>=2.2
+      - torchvision>=0.17     # transformers' fast image processors import it
+      - transformers>=4.40

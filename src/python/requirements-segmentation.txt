@@ -1,0 +1,19 @@
+# ONLY for image_analysis/segment_panorama.py — the optional step where a model writes
+# the scene geometry instead of you tuning it by ear.
+#
+# WARNING: torch and opencv 5 both require numpy >= 2 and will upgrade it. If your
+# environment has anything pinned to numpy 1.26.4, install these in a SEPARATE conda
+# environment:
+#
+#   conda create -n soundscapes-seg python=3.12 -y
+#   conda activate soundscapes-seg
+#   pip install -r src/python/requirements-segmentation.txt
+#
+# Tested against opencv 4.13 / numpy 2.4. opencv 5.x should be fine (remap, resize and
+# the INTER_*/BORDER_* flags are unchanged); pin "opencv-python<5" if it misbehaves.
+-r requirements.txt
+opencv-python>=4.9
+scipy>=1.11
+torch>=2.2
+torchvision>=0.17          # transformers' fast image processors import it
+transformers>=4.40

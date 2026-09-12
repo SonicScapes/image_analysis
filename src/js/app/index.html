@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SoundScapes — Experience Sound &amp; Nature</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ink: #E6ECE8; --muted: #93A39C; --faint: #6B7A74;
+    --panel: rgba(11,17,16,.76); --line: rgba(230,236,232,.16);
+    --teal: #58B9BE; --moss: #92B981; --amber: #E09257;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #0B100F; color: var(--ink); overflow: hidden;
+    font-family: "Archivo", system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+    touch-action: none; user-select: none;
+  }
+
+  /* ---- panorama viewport ---- */
+  #stage { position: fixed; inset: 0; overflow: hidden; cursor: grab; background: #0B100F; }
+  #stage.dragging { cursor: grabbing; }
+  #strip { position: absolute; top: 0; left: 0; height: 100%; will-change: transform; display: flex; }
+  #strip img { height: 100%; width: auto; display: block; max-width: none; pointer-events: none; }
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(130% 90% at 50% 45%, transparent 40%, rgba(5,9,8,.55) 100%);
+  }
+
+  /* ---- gate ---- */
+  #gate {
+    position: fixed; inset: 0; z-index: 40; display: grid; place-items: center;
+    background: radial-gradient(120% 90% at 50% 40%, #16211F 0%, #080C0B 72%);
+    padding: 24px; text-align: center;
+  }
+  #gate .inner { max-width: 36rem; display: grid; gap: 1.2rem; justify-items: center; }
+  #gate .kicker {
+    font-family: "IBM Plex Mono", monospace; font-size: .7rem; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--teal);
+  }
+  #gate h1 { font-size: clamp(2rem, 6.5vw, 3.4rem); margin: 0; letter-spacing: -.022em; line-height: 1.03; }
+  #gate p { margin: 0; color: var(--muted); font-size: 1.05rem; line-height: 1.5; max-width: 30rem; }
+  #gate .hint { font-family: "IBM Plex Mono", monospace; font-size: .76rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--faint); }
+  button.primary {
+    font-family: "IBM Plex Mono", monospace; font-size: .82rem; letter-spacing: .14em;
+    text-transform: uppercase; padding: .95rem 2.1rem; border-radius: 999px; cursor: pointer;
+    background: var(--teal); color: #06100F; border: none; font-weight: 500;
+  }
+  button.primary:disabled { opacity: .45; cursor: progress; }
+  button.primary:focus-visible, .ctl:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }
+
+  /* ---- hud ---- */
+  .hud {
+    position: fixed; z-index: 20; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 4px; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  }
+  #title { top: 16px; left: 16px; padding: .7rem .95rem; }
+  #title .n { font-weight: 600; font-size: .98rem; }
+  #title .s { font-family: "IBM Plex Mono", monospace; font-size: .7rem; color: var(--muted);
+    letter-spacing: .08em; text-transform: uppercase; margin-top: .22rem; }
+
+  #meters { top: 16px; right: 16px; width: 16rem; padding: .8rem .9rem; max-height: 60vh; overflow-y: auto; }
+  #meters h2 { font-family: "IBM Plex Mono", monospace; font-size: .64rem; letter-spacing: .13em;
+    text-transform: uppercase; color: var(--faint); margin: 0 0 .6rem; font-weight: 500; }
+  .row { display: grid; grid-template-columns: 4.8rem 1fr 2.4rem; gap: .45rem; align-items: center; margin-bottom: .32rem; }
+  .row .lbl { font-family: "IBM Plex Mono", monospace; font-size: .68rem; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { height: 5px; background: rgba(230,236,232,.1); border-radius: 3px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0%; background: var(--teal); border-radius: 3px; transition: width .1s linear; }
+  .row.event .bar i { background: var(--amber); }
+  .row.bed .bar i { background: var(--moss); }
+  .row .db { font-family: "IBM Plex Mono", monospace; font-size: .63rem; color: var(--faint);
+    text-align: right; font-variant-numeric: tabular-nums; }
+  .row.fired .lbl { color: var(--amber); }
+
+  #compass { left: 16px; bottom: 16px; }
+  #controls { right: 16px; bottom: 16px; padding: .85rem .95rem; display: grid; gap: .75rem; width: 16rem; }
+  #controls label { font-family: "IBM Plex Mono", monospace; font-size: .64rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--faint); display: flex; justify-content: space-between; }
+  #controls label b { color: var(--teal); font-weight: 500; }
+  #controls .pressure label b { color: var(--amber); }
+  input[type=range] { width: 100%; accent-color: var(--teal); margin: .15rem 0 0; }
+  .pressure input[type=range] { accent-color: var(--amber); }
+  .ctl { font-family: "IBM Plex Mono", monospace; font-size: .66rem; letter-spacing: .1em;
+    text-transform: uppercase; background: transparent; color: var(--ink); cursor: pointer;
+    border: 1px solid var(--line); border-radius: 3px; padding: .5rem; }
+  .ctl:hover { border-color: var(--teal); color: var(--teal); }
+
+  #err { position: fixed; z-index: 50; inset: auto 16px 16px 16px; padding: .8rem 1rem;
+    background: #3A1D12; border: 1px solid var(--amber); border-radius: 4px; color: #FFD9BE;
+    font-family: "IBM Plex Mono", monospace; font-size: .74rem; line-height: 1.5; display: none; }
+
+  @media (max-width: 760px) {
+    #meters, #compass { display: none; }
+    #controls { left: 16px; right: 16px; width: auto; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div id="stage"><div id="strip"></div></div>
+<div id="vignette"></div>
+
+<div id="title" class="hud" hidden>
+  <div class="n" id="poiName">—</div>
+  <div class="s">bearing <span id="bearing">0°</span> · <span id="fovOut">0°</span> field of view</div>
+</div>
+
+<div id="meters" class="hud" hidden>
+  <h2>Live mix — what you see is what you hear</h2>
+  <div id="rows"></div>
+</div>
+
+<svg id="compass" class="hud" width="132" height="132" viewBox="0 0 132 132" hidden aria-hidden="true">
+  <circle cx="66" cy="66" r="52" fill="none" stroke="rgba(230,236,232,.18)"/>
+  <circle cx="66" cy="66" r="26" fill="none" stroke="rgba(230,236,232,.09)"/>
+  <path id="wedge" fill="rgba(88,185,190,.20)" stroke="rgba(88,185,190,.5)" stroke-width="1"></path>
+  <g id="dots"></g>
+  <text x="66" y="17" text-anchor="middle" fill="#6B7A74" font-family="IBM Plex Mono, monospace" font-size="9">N</text>
+</svg>
+
+<div id="controls" class="hud" hidden>
+  <div>
+    <label for="scenic">Scenicness <b id="scenicVal">8.0</b></label>
+    <input type="range" id="scenic" min="0" max="10" step="0.1" value="8">
+  </div>
+  <div class="pressure">
+    <label for="pressure">Human pressure <b id="pressureVal">0.0</b></label>
+    <input type="range" id="pressure" min="0" max="10" step="0.1" value="0">
+  </div>
+  <button class="ctl" id="gyroBtn" hidden>Use device motion</button>
+</div>
+
+<div id="gate">
+  <div class="inner">
+    <p class="kicker">Nationalpark Hohe Tauern · recorded on site</p>
+    <h1 id="gateTitle">Hohe Tauern</h1>
+    <p>Put on headphones and look around. What you turn towards is what you hear — mixed live from recordings made at this spot.</p>
+    <button class="primary" id="startBtn">Listen</button>
+    <p class="hint" id="status">headphones required</p>
+  </div>
+</div>
+
+<div id="err"></div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

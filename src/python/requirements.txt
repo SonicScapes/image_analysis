@@ -1,0 +1,10 @@
+# Core — everything except the optional segmentation step
+numpy>=1.24
+pillow>=10.0
+pillow-heif>=0.16          # iPhone HEIC photos
+opencv-python>=4.9         # equirect <-> perspective reprojection
+scipy>=1.11                # connected components for sound regions
+
+# prepare_audio.py additionally needs ffmpeg + ffprobe on PATH:
+#   brew install ffmpeg
+# There is no pip package for those.

@@ -1,0 +1,11 @@
+{
+  "name": "soundscapes",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Viewport-coupled soundscapes for alpine trails. Music & AI Hackathon 2026, Challenge 1 (cta / Austria Tourism).",
+  "scripts": {
+    "dev": "npx --yes serve . -l 3000",
+    "sounds": "node src/js/tools/fetch-sounds.mjs"
+  }
+}
