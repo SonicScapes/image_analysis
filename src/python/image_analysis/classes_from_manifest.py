@@ -16,13 +16,16 @@ gave to classes we do not model is gone and `other` cannot be recovered. What yo
 so in its header rather than quietly implying the two are the same.
 """
 
-import argparse, json, math
+import argparse, json, math, sys
 from pathlib import Path
 
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[3]
-DEFAULT_SCENES = REPO / "data" / "scenes"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/python
+from paths import SCENES_DIR
+
+DEFAULT_SCENES = SCENES_DIR
 VOID = 255
 
 

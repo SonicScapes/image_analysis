@@ -19,7 +19,10 @@ import argparse, importlib.util, json, sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
-DEFAULT_SCENES = REPO / "data" / "scenes"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/python
+from paths import DATA_ROOT, SCENES_DIR
+
+DEFAULT_SCENES = SCENES_DIR
 
 # Reuse the single source of truth rather than restating it here.
 _spec = importlib.util.spec_from_file_location(
@@ -138,7 +141,7 @@ def main():
         # fetcher does not have to keep its own copy of it and drift.
         out = Path(args.json_out)
         if not out.is_absolute():
-            out = REPO / out
+            out = DATA_ROOT / out
         out.parent.mkdir(parents=True, exist_ok=True)
         needs = []
         for cls, pct in sorted(all_gaps.items(), key=lambda t: -t[1]):

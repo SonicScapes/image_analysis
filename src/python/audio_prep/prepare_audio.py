@@ -38,11 +38,14 @@ DEFAULT_IN = (REPO / "resources" / "recordings"
               if (REPO / "resources" / "recordings").is_dir()
               else REPO / "resources" / "sounds")
 FREESOUND_IN = REPO / "resources" / "sounds-freesound"
-DEFAULT_OUT = REPO / "data" / "scenes"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/python
+from paths import SCENES_DIR, AUDIO_DIR
+
+DEFAULT_OUT = SCENES_DIR
 # One shared pool for processed audio. The engine never modifies these files — every
 # gain, pan, filter and distance decision happens at runtime from scene.json — so a
 # stem is identical for every scene that uses it and copying it per scene is waste.
-AUDIO_OUT = REPO / "data" / "audio"
+AUDIO_OUT = AUDIO_DIR
 
 SR = 48000              # working sample rate
 ANALYSIS_SR = 8000      # enough to find a stationary window, 6x faster to decode

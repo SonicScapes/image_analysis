@@ -22,12 +22,15 @@ Everything else is regenerated, so re-running after a better segmentation pass o
 download simply improves the scene.
 """
 
-import argparse, json, re
+import argparse, json, re, sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
-DEFAULT_SCENES = REPO / "data" / "scenes"
-DEFAULT_AUDIO = REPO / "data" / "audio"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/python
+from paths import SCENES_DIR, AUDIO_DIR
+
+DEFAULT_SCENES = SCENES_DIR
+DEFAULT_AUDIO = AUDIO_DIR
 
 # A stem recorded for one thing can legitimately serve a class named for another: our
 # footsteps take is what `person` sounds like from two metres, and a wind bed is what an
@@ -152,8 +155,6 @@ def main():
     if args.dry_run:
         print("\n(dry run — nothing written)")
     else:
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from scene_index import write_index
         dest, entries = write_index(root)
         print(f"\nindex: {len(entries)} scene(s) -> {dest}")

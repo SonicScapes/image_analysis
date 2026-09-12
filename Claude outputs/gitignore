@@ -1,0 +1,20 @@
+# Generated scene assets — rebuild with the scripts in src/python
+# (scenes/<category>/<id>/..., category being 360pano/ or photos/)
+scenes/audio/
+scenes/*/*/*.mp3
+scenes/*/*/*.ogg
+scenes/*/*/panorama.jpg
+scenes/*/*/labels.png
+scenes/*/*/overlay.png
+scenes/*/*/overlay_labeled.png
+scenes/index.json
+scenes/audio-needs.json
+
+# Source media stays out of git; it lives on the recorder and in the shared drive
+resources/
+
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

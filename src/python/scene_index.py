@@ -14,7 +14,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-DEFAULT_SCENES = REPO / "data" / "scenes"
+
+from paths import SCENES_DIR as DEFAULT_SCENES
 
 
 def write_index(scenes_dir=DEFAULT_SCENES, quiet=True):

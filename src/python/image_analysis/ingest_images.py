@@ -52,7 +52,10 @@ REPO = Path(__file__).resolve().parents[3]
 DEFAULT_IN = (REPO / "resources" / "panoramas360_static"
               if (REPO / "resources" / "panoramas360_static").is_dir()
               else REPO / "resources" / "photos")
-DEFAULT_OUT = REPO / "data" / "scenes"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/python
+from paths import SCENES_DIR
+
+DEFAULT_OUT = SCENES_DIR
 
 # Web delivery caps. A 7000 px JPEG is 5 MB and nobody can see the difference while
 # panning; these keep a scene under ~2 MB of imagery.

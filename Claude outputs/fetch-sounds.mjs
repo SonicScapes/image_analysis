@@ -47,16 +47,12 @@ const LICENSES = CC0_ONLY
 // What to fetch comes from the scenes themselves when it can.
 //
 // `check_coverage.py --json` walks every scene's class report, works out which sounding
-// classes have no audio wired up, and writes data/audio-needs.json. Reading that keeps
+// classes have no audio wired up, and writes scenes/audio-needs.json. Reading that keeps
 // the class taxonomy in exactly one place (Python) instead of drifting between two.
 // Without it we fall back to the list below, which is what the Hohe Tauern scenes
 // needed the first time round.
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../..');
-// The generated data lives in the viewer repo next door — see src/python/paths.py,
-// which is what writes audio-needs.json in the first place. Same env override.
-const DATA_ROOT = process.env.SOUNDSCAPES_DATA ||
-  path.resolve(REPO, '..', 'SonicScapes', '360viewer_app', 'data');
-const NEEDS_FILE = process.env.NEEDS_FILE || path.join(DATA_ROOT, 'audio-needs.json');
+const NEEDS_FILE = process.env.NEEDS_FILE || path.join(REPO, 'scenes', 'audio-needs.json');
 
 const FALLBACK = [
   { id: 'rock',    type: 'region', query: 'wind mountain ridge rock',      minDur: 15, maxDur: 90 },
@@ -72,7 +68,7 @@ const FALLBACK = [
 
 function loadPlan() {
   if (!existsSync(NEEDS_FILE)) {
-    console.log('No data/audio-needs.json — using the built-in list.');
+    console.log('No scenes/audio-needs.json — using the built-in list.');
     console.log('For a list driven by what your scenes actually contain, run first:');
     console.log('  python src/python/audio_prep/check_coverage.py --json\n');
     return FALLBACK;
@@ -150,7 +146,7 @@ async function download(url, dest) {
 }
 
 // Downloads are SOURCE material, so they live beside our own recordings under
-// resources/ — not in data/scenes/, which holds only what the pipeline generates.
+// resources/ — not in scenes/, which holds only what the pipeline generates.
 // prepare_audio.py then turns them into scene layers exactly as it does our own takes.
 const outDir = process.env.OUT_DIR
   ? path.resolve(process.env.OUT_DIR)
