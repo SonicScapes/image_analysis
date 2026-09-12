@@ -113,6 +113,26 @@ Each scene folder then gains three files beside `scene.json`:
 | `overlay.png` | the photo with the labels painted over it — the pitch image |
 | `labels.png` | the raw sphere label map |
 
+### Do we have a sound for everything we can see?
+
+```bash
+python src/python/audio_prep/check_coverage.py --queries
+```
+
+Compares each scene's `scene_classes.txt` against the layers wired up in its `scene.json`
+and prints the gap, biggest share of the view first, with a Freesound query for each.
+Classes that are silent by design (`sky`, `trail`) are reported as such, not as holes.
+
+Then fill the gaps:
+
+```bash
+export FREESOUND_TOKEN=xxxxxxxx        # https://freesound.org/apiv2/apply/
+node src/js/tools/fetch-sounds.mjs
+```
+
+Its query table is aimed at what segmentation actually found in the Hohe Tauern —
+rock, snow, scree, glacier — not at the forest-and-lake set we assumed before shooting.
+
 `docs/image_categories.md` lists every category, where the lists live, and how to add one.
 See `docs/segmentation.md` for what runs offline and the sphere-geometry traps — and read
 its last section before deciding to run this tonight.

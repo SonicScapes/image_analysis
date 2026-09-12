@@ -35,7 +35,8 @@ collapse into one thing we care about. Indices are verified against
 | `waterfall` | 114 waterfall | yes, region — loudest thing in the set |
 | `trail` | 53 path | no — informational only |
 | `built` | 26 house, 33 fence, 49 skyscraper, 62 bridge | yes, region |
-| `animal` | 13 person, 127 animal | yes, event |
+| `animal` | 127 animal | yes, event — wildlife |
+| `person` | 13 person | yes, event — tagged `human` |
 
 ### From CLIPSeg text prompts (`--open-vocab`)
 
@@ -50,6 +51,7 @@ ensemble with the ADE pass.
 | `scree` | "a slope of loose grey scree and broken rock" | yes, region — also ADE-backed |
 | `cattle` | "cows grazing on an alpine pasture" | yes, event |
 | `cablecar` | "a cable car line or ski lift pylon" | yes, event, tagged human |
+| `person` | "people hiking, walkers with backpacks" | yes, event — also ADE-backed |
 
 ### `other`
 
@@ -62,6 +64,26 @@ something and we have no category for it*. No threshold, no tuning.
 So `other` is a diagnostic. A few percent is normal. **Thirty percent means the label set
 is missing something that is actually in front of the camera** — open `overlay.png`, find
 the grey, and add a class.
+
+### Why `person` is not `animal`
+
+ADE20K's label 13 is `person`, and it was originally folded into our `animal` class
+because both are "a moving thing that makes a noise". That was wrong twice over: a hiker
+would trigger a bird call, and the one class the human-pressure control exists to notice
+could not be seen at all.
+
+`person` is now its own class, an event tagged `human`, and it does something the others
+do not: **a detected person raises the scene's starting pressure rather than being hidden
+by it.** `segment_panorama.py` writes `scene.pressure` from what is visibly human —
+
+```
+pressure = 2 * sqrt(person% + 0.8 x cablecar% + 0.5 x built%)      capped at 10
+```
+
+— and the engine and viewer start there instead of at pristine. The square root is
+deliberate: one hiker in frame changes how a place feels far more than their 1 % of the
+pixels suggests. If there are people in the picture, the place already has people in it,
+and pretending otherwise is the kind of flattery this project is supposed to avoid.
 
 ## `scene_classes.txt`
 

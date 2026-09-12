@@ -41,37 +41,45 @@ const LICENSES = ALLOW_BY
  * authoring job for a hackathon PoI, and it takes about ten minutes.
  */
 const SCENE = {
-  id: 'kaprun-wasserfallboden',
-  name: 'Wasserfallboden',
-  scene: { scenicness: 8.4, eventfulness: 6.8 },
+  id: 'gap-fill',
+  name: 'Gap fill',
+  scene: { scenicness: 7.5, eventfulness: 5.0 },
+  // Targeted at what segmentation ACTUALLY found in the Hohe Tauern scenes — rock,
+  // snow, scree and glacier dominate, and we recorded none of them. Water and waterfall
+  // are deliberately absent: we have our own, and ours are better.
+  //
+  // Percentages are the share of the view each class covered, from scene_classes.txt.
+  // Run src/python/audio_prep/check_coverage.py to regenerate this list for new scenes.
   layers: [
-    { id: 'bed', type: 'bed', query: 'mountain wind ambience', minDur: 20, maxDur: 120, gain: -12 },
-    { id: 'wind', type: 'region', query: 'wind gusts exposed ridge', minDur: 15, maxDur: 90,
-      az: 320, el: 15, spread: 90, distance: 30, gain: -10, tags: ['wind'] },
-    { id: 'waterfall', type: 'region', query: 'waterfall close', minDur: 15, maxDur: 90,
-      az: 285, el: -10, spread: 30, distance: 110, gain: 2, focus: 10 },
-    { id: 'stream', type: 'region', query: 'mountain stream brook', minDur: 15, maxDur: 90,
-      az: 240, el: -25, spread: 45, distance: 35, gain: -4 },
-    { id: 'forest', type: 'region', query: 'forest wind trees leaves ambience', minDur: 15, maxDur: 90,
-      az: 150, el: -5, spread: 55, distance: 180, gain: -6 },
-    { id: 'lake', type: 'region', query: 'lake shore water lapping', minDur: 15, maxDur: 90,
-      az: 20, el: -18, spread: 50, distance: 260, gain: -8 },
-    { id: 'meadow', type: 'region', query: 'meadow grasshopper insects summer', minDur: 15, maxDur: 90,
-      az: 95, el: -12, spread: 60, distance: 60, gain: -12 },
+    // rock — up to 40% of the view. The single biggest hole.
+    { id: 'rock', type: 'region', query: 'wind mountain ridge rock', minDur: 15, maxDur: 90,
+      az: 0, el: 5, spread: 70, distance: 400, gain: -14, focus: 6, tags: ['wind'] },
+    // snow — 18-26% in every scene, and we have nothing at all for it.
+    { id: 'snow', type: 'region', query: 'wind over snow field', minDur: 15, maxDur: 90,
+      az: 60, el: 0, spread: 60, distance: 300, gain: -16, focus: 6 },
+    { id: 'scree', type: 'region', query: 'wind gravel scree slope', minDur: 15, maxDur: 90,
+      az: 300, el: -10, spread: 55, distance: 250, gain: -12, focus: 7 },
+    { id: 'glacier', type: 'region', query: 'glacier ice creaking', minDur: 10, maxDur: 90,
+      az: 20, el: 0, spread: 40, distance: 500, gain: -14, focus: 7 },
+    { id: 'pasture', type: 'region', query: 'alpine meadow insects summer', minDur: 15, maxDur: 90,
+      az: 150, el: -12, spread: 60, distance: 60, gain: -12, focus: 7 },
+    { id: 'built', type: 'region', query: 'wooden hut creak wind', minDur: 10, maxDur: 60,
+      az: 200, el: -5, spread: 30, distance: 150, gain: -18, focus: 8 },
 
-    // Events. Keep 2-4 variants each so repetition never becomes audible.
-    { id: 'cowbell', type: 'event', query: 'cow bell alps', count: 3, maxDur: 8,
-      az: 110, el: -10, spread: 35, distance: 300, gain: 4, ratePerMin: 7 },
-    { id: 'raven', type: 'event', query: 'raven croak call', count: 3, maxDur: 6,
-      az: 300, el: 30, spread: 60, distance: 200, gain: 2, ratePerMin: 3 },
-    { id: 'chough', type: 'event', query: 'alpine chough bird call', count: 2, maxDur: 6,
-      az: 340, el: 40, spread: 70, distance: 420, gain: 4, ratePerMin: 2.5 },
+    // Events. 2-4 variants each so repetition never becomes audible.
+    { id: 'cattle', type: 'event', query: 'cow bell alps', count: 3, maxDur: 8,
+      az: 150, el: -8, spread: 40, distance: 300, gain: 4, ratePerMin: 6, tags: ['wildlife'] },
+    { id: 'animal', type: 'event', query: 'alpine chough bird call', count: 3, maxDur: 6,
+      az: 330, el: 30, spread: 70, distance: 250, gain: 2, ratePerMin: 3, tags: ['wildlife'] },
     { id: 'marmot', type: 'event', query: 'marmot whistle', count: 2, maxDur: 5,
-      az: 200, el: -5, spread: 40, distance: 150, gain: 3, ratePerMin: 1.5 },
-    { id: 'rockfall', type: 'event', query: 'small rockfall gravel scree', count: 3, maxDur: 8,
-      az: 315, el: 5, spread: 45, distance: 380, gain: 2, ratePerMin: 1.2 },
-    { id: 'smallbirds', type: 'event', query: 'small bird chirp single', count: 4, maxDur: 5,
-      az: 150, el: 5, spread: 70, distance: 45, gain: -4, ratePerMin: 12 },
+      az: 260, el: -5, spread: 40, distance: 150, gain: 3, ratePerMin: 1.5, tags: ['wildlife'] },
+    { id: 'rockfall', type: 'event', query: 'small rockfall gravel', count: 3, maxDur: 8,
+      az: 300, el: 0, spread: 45, distance: 380, gain: 2, ratePerMin: 1.2 },
+    // Human presence, for the pressure control. Held 40 dB down until it is raised.
+    { id: 'cablecar', type: 'event', query: 'ski lift cable car motor', count: 2, maxDur: 10,
+      az: 60, el: 8, spread: 40, distance: 250, gain: -2, ratePerMin: 4, tags: ['human'] },
+    { id: 'person', type: 'event', query: 'distant hikers voices outdoor', count: 3, maxDur: 8,
+      az: 200, el: -5, spread: 50, distance: 60, gain: -4, ratePerMin: 5, tags: ['human'] },
   ],
 };
 

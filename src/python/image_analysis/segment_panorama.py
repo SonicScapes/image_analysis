@@ -48,7 +48,10 @@ ALPINE_CLASSES = {
     "waterfall":  [114],
     "trail":      [53],
     "built":      [26, 33, 62, 49],  # house, fence, bridge, skyscraper
-    "animal":     [127, 13],         # animal, person
+    "animal":     [127],             # wildlife only
+    "person":     [13],              # hikers. Split out of `animal` deliberately: a
+                                     # walker is not a marmot, and this is the class the
+                                     # human-pressure control exists to notice.
 }
 
 # Classes CLIPSeg adds by text prompt, because ADE20K has no label for them.
@@ -58,6 +61,7 @@ OPEN_VOCAB_PROMPTS = {
     "scree":    "a slope of loose grey scree and broken rock",
     "cattle":   "cows grazing on an alpine pasture",
     "cablecar": "a cable car line or ski lift pylon",
+    "person":   "people hiking, walkers with backpacks",
 }
 
 # Sound design intent per class: base level in dB, focus bonus, default spread cap,
@@ -76,6 +80,7 @@ SOUND_SPEC = {
     "trail":     (None,       0,     0,      0,  1.00),  # silent, informational
     "sky":       (None,       0,     0,      0,  1.00),  # silent; wind bed covers it
     "cattle":    ("event",    4,     6,    300,  0.01),
+    "person":    ("event",   -4,     7,     60,  0.002),
     "animal":    ("event",    4,     6,    300,  0.01),
     "cablecar":  ("event",   -4,     8,    250,  0.005),
 }
@@ -88,6 +93,7 @@ QUERIES = {
     "snow": "wind over snow", "glacier": "ice creaking glacier",
     "built": "wooden hut creak", "cattle": "cow bell alps",
     "animal": "small bird chirp single", "cablecar": "cable car motor hum",
+    "person": "distant hikers voices outdoor",
 }
 
 CAMERA_HEIGHT_M = 1.6  # eye height; used for the ground-plane distance estimate
@@ -310,7 +316,7 @@ def clipseg_probs(crop, prompts, device):
 # ---------------------------------------------------------------------------
 # Sphere label map -> sound regions
 # ---------------------------------------------------------------------------
-def regions_from_labels(labels, class_order, grid_h, grid_w):
+def regions_from_labels(labels, class_order, grid_h, grid_w, max_per_class=3):
     """
     Connected components per class, then for each blob: solid angle, centroid direction,
     angular spread. cos(latitude) weighting matters — without it the poles, which are a
@@ -328,6 +334,7 @@ def regions_from_labels(labels, class_order, grid_h, grid_w):
         if not spec or spec[0] is None:
             continue
         ltype, gain, focus, far_m, min_sr = spec
+        found = []          # components for this class, before merging or capping
 
         mask = labels == n
         if not mask.any():
@@ -391,15 +398,50 @@ def regions_from_labels(labels, class_order, grid_h, grid_w):
             else:
                 dist = float(far_m)
 
-            out.append({
-                "id": name if ncomp == 1 else f"{name}-{c}",
+            found.append({
                 "class": name, "type": ltype,
                 "az": round(az_c, 1), "el": round(el_c, 1),
                 "spread": round(spread, 1), "distance": round(dist),
                 "gain": gain, "focus": focus,
                 "solid_angle_sr": round(sr, 4),
                 "query": QUERIES.get(name, name),
+                "_vec": (cx, sx), "_w": float(w.sum()),
             })
+
+        if not found:
+            continue
+        found.sort(key=lambda r: -r["solid_angle_sr"])
+
+        if ltype == "event":
+            # One layer per class, not one per individual. Twenty hikers are not twenty
+            # sound sources needing twenty files — they are one event layer whose
+            # scheduler picks a direction inside their combined extent each time it
+            # fires. Merging also stops a crowd from being twenty times as loud.
+            cx = sum(r["_vec"][0] for r in found)
+            sx = sum(r["_vec"][1] for r in found)
+            total_sr = sum(r["solid_angle_sr"] for r in found)
+            az_c = math.degrees(math.atan2(sx, cx)) % 360
+            el_c = sum(r["el"] * r["solid_angle_sr"] for r in found) / max(total_sr, 1e-9)
+            # Spread must cover where they actually are, not just their combined area.
+            spans = [abs(((r["az"] - az_c + 180) % 360) - 180) for r in found]
+            spread = float(np.clip(max(spans + [8.0]) + 6.0, 12, 100))
+            dist = sorted(r["distance"] for r in found)[len(found) // 2]
+            merged = dict(found[0])
+            merged.update(id=name, az=round(az_c, 1), el=round(el_c, 1),
+                          spread=round(spread, 1), distance=dist,
+                          solid_angle_sr=round(total_sr, 4), count=len(found))
+            out.append(merged)
+        else:
+            # Regions: a big face split by an occluder genuinely wants two directions,
+            # but nine of them is a manifest nobody will tune. Keep the largest few.
+            for i, r in enumerate(found[:max_per_class], 1):
+                r = dict(r)
+                r["id"] = name if len(found[:max_per_class]) == 1 else f"{name}-{i}"
+                out.append(r)
+
+    for r in out:
+        r.pop("_vec", None)
+        r.pop("_w", None)
     out.sort(key=lambda r: -r["solid_angle_sr"])
     return out
 
@@ -481,6 +523,7 @@ PALETTE = {
     "waterfall": (200, 232, 240), "trail": (196, 160, 110), "built": (188, 96, 70),
     "animal": (226, 146, 87), "snow": (240, 244, 248), "glacier": (150, 205, 220),
     "cattle": (214, 122, 70), "cablecar": (120, 100, 140),
+    "person": (232, 72, 96),
 }
 
 
@@ -535,6 +578,9 @@ def main():
                     help="default: read from the scene's panorama block, else equirect")
     ap.add_argument("--hfov", type=float, default=None, help="horizontal degrees covered")
     ap.add_argument("--vfov", type=float, default=None, help="vertical degrees covered")
+    ap.add_argument("--max-regions-per-class", type=int, default=3,
+                    help="keep at most this many region layers per class (default "
+                         "%(default)s). Event classes are always merged into one.")
     ap.add_argument("--analysis-max-side", type=int, default=ANALYSIS_MAX_SIDE,
                     help="cap on the resolution inference runs at (default %(default)s). "
                          "Raising this buys no accuracy and costs memory quadratically.")
@@ -663,7 +709,8 @@ def main():
     valid_lo = (labels_hi != VOID).reshape(gh, fy, gw, fx).mean((1, 3))
     labels_lo[valid_lo < 0.5] = VOID     # regions_from_labels skips anything not a class
 
-    regions = regions_from_labels(labels_lo, class_order, gh, gw)
+    regions = regions_from_labels(labels_lo, class_order, gh, gw,
+                                  args.max_regions_per_class)
     overlay_lonlat = None
     if flat:
         _, lon_f, lat_f = flat_view(erp, hfov, vfov)
@@ -707,14 +754,26 @@ def main():
                 3 + 8 * sum(r["solid_angle_sr"] for r in regions
                             if r["class"] in ("water", "waterfall", "animal", "cattle"))
                 / max(sum(r["solid_angle_sr"] for r in regions), 1e-6), 0, 10)), 1),
+            # Starting value for the human-pressure control, from what is visibly human
+            # in the frame. Square-rooted on purpose: one hiker changes how a place feels
+            # far more than their 1% of the pixels suggests. Detected people SET the
+            # baseline rather than being hidden by it — if there are people in the
+            # picture, the place already has people in it.
+            "pressure": round(min(10.0, 2.0 * math.sqrt(
+                dict(rows).get("person", 0) * 1.0
+                + dict(rows).get("cablecar", 0) * 0.8
+                + dict(rows).get("built", 0) * 0.5)), 1),
         },
         "classes": {n: v for n, v in rows},
         "grid": {"w": gw, "h": gh, "classes": class_order,
                  "cells": labels_lo.flatten().tolist()},
-        "layers": [{"id": r["id"], "type": r["type"], "az": r["az"], "el": r["el"],
-                    "spread": r["spread"], "distance": r["distance"],
-                    "gain": r["gain"], "focus": r["focus"],
-                    "query": r["query"], "src": f"{r['class']}-1.mp3"} for r in regions],
+        "layers": [{k: v for k, v in {
+                        "id": r["id"], "type": r["type"], "az": r["az"], "el": r["el"],
+                        "spread": r["spread"], "distance": r["distance"],
+                        "gain": r["gain"], "focus": r["focus"],
+                        "count": r.get("count"), "query": r["query"],
+                        "src": f"{r['class']}-1.mp3",
+                    }.items() if v is not None} for r in regions],
     }
     (out_dir / "scene.segmented.json").write_text(json.dumps(manifest, indent=2))
 
@@ -722,9 +781,13 @@ def main():
     for r in regions[:14]:
         print(f"  {r['id']:<14} az {r['az']:>5.1f}  el {r['el']:>5.1f}  "
               f"spread {r['spread']:>4.0f}  {r['distance']:>4} m  {r['solid_angle_sr']:.3f} sr")
+    human = {k: dict(rows).get(k, 0) for k in ("person", "built", "cablecar")}
     print("\nclass coverage (of what the camera saw):")
     for n, v in rows:
         print(f"  {n:<12} {v:>3}%")
+    if any(human.values()):
+        print(f"\nvisibly human: " + ", ".join(f"{k} {v}%" for k, v in human.items() if v)
+              + f" -> starting pressure {manifest['scene']['pressure']}")
     print(f"\nwrote {out_dir}/scene.segmented.json, {classes_path.name},")
     print("      labels.png, overlay.png")
     print("Next: fill the `src` files (fetch-sounds.mjs uses the `query` fields),")

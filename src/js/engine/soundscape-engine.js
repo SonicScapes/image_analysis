@@ -133,6 +133,11 @@ export class SoundscapeEngine {
         scenicness: manifest.scene.scenicness ?? this.mood.scenicness,
         eventfulness: manifest.scene.eventfulness ?? this.mood.eventfulness,
       };
+      // Segmentation may have seen people in the frame. If so the scene starts with that
+      // much human presence already audible, rather than at pristine.
+      if (manifest.scene.pressure != null) {
+        this.pressure = clamp(manifest.scene.pressure, 0, 10) / 10;
+      }
     }
     this._buildGraph();
     return this;

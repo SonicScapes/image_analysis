@@ -160,6 +160,8 @@ $('startBtn').addEventListener('click', async () => {
     $('poiName').textContent = scene.name ?? scene.id;
     $('scenic').value = scene.scene?.scenicness ?? 8;
     $('scenicVal').textContent = (+$('scenic').value).toFixed(1);
+    $('pressure').value = scene.scene?.pressure ?? 0;
+    $('pressureVal').textContent = (+$('pressure').value).toFixed(1);
     buildRows();
     for (const el of ['title', 'meters', 'compass', 'controls']) $(el).hidden = false;
     $('gate').style.display = 'none';
