@@ -27,8 +27,8 @@
   /* ---- panorama viewport ---- */
   #stage { position: fixed; inset: 0; overflow: hidden; cursor: grab; background: #0B100F; }
   #stage.dragging { cursor: grabbing; }
-  #strip { position: absolute; top: 0; left: 0; height: 100%; will-change: transform; display: flex; }
-  #strip img { height: 100%; width: auto; display: block; max-width: none; pointer-events: none; }
+  #gl, #flat { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #flat { background-color: #0B100F; }
   #vignette {
     position: fixed; inset: 0; pointer-events: none;
     background: radial-gradient(130% 90% at 50% 45%, transparent 40%, rgba(5,9,8,.55) 100%);
@@ -156,11 +156,16 @@
 </head>
 <body>
 
-<div id="stage"><div id="strip"></div></div>
+<div id="stage">
+  <canvas id="gl" hidden></canvas>
+  <div id="flat" hidden></div>
+</div>
 <div id="vignette"></div>
 
 <div id="title" class="hud" hidden>
   <div class="n"><span id="poiName">—</span><span id="silentBadge" hidden>silent</span><span id="noAudio" hidden>no audio</span></div>
+  <div class="s" id="placeName"></div>
+  <div class="s" id="geo" hidden></div>
   <div class="s">bearing <span id="bearing">0°</span> · <span id="fovOut">0°</span> field of view</div>
   <div class="nav" id="sceneNav" hidden>
     <button id="prevScene" title="Previous scene (←)">&#8249;</button>
@@ -261,7 +266,7 @@
                      'http — run <code>npm run dev</code> and open ' +
                      '<code>localhost:3000/src/js/app/index.html</code>.');
         }
-        for (const rel of ['./app.js', '../engine/soundscape-engine.js']) {
+        for (const rel of ['./app.js', './sphere.js', '../engine/soundscape-engine.js']) {
           try {
             const r = await fetch(new URL(rel, location.href).href, { cache: 'no-store' });
             const ct = r.headers.get('content-type') || '(none)';
