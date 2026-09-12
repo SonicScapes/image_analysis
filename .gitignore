@@ -5,6 +5,8 @@ data/scenes/
 # Source media stays out of git; it lives on the recorder and in the shared drive
 resources
 
+freesound api key.txt
+
 node_modules/
 __pycache__/
 *.pyc
