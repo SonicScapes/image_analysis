@@ -20,7 +20,7 @@
  */
 
 import { writeFile, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const TOKEN = process.env.FREESOUND_TOKEN;
@@ -29,10 +29,14 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-const ALLOW_BY = process.argv.includes('--allow-by');
-const LICENSES = ALLOW_BY
-  ? '("Creative Commons 0" OR "Attribution")'
-  : '"Creative Commons 0"';
+// CC0 alone is a small corner of Freesound, and combined with a duration filter it
+// returns nothing for most specific queries. Attribution is equally safe commercially —
+// it just has to be credited, and CREDITS.md is written automatically — so both are the
+// default. --cc0-only restores the strict behaviour.
+const CC0_ONLY = process.argv.includes('--cc0-only');
+const LICENSES = CC0_ONLY
+  ? '"Creative Commons 0"'
+  : '("Creative Commons 0" OR "Attribution")';
 
 /**
  * The scene spec. Each entry is both a Freesound query AND the layer geometry.
@@ -40,61 +44,63 @@ const LICENSES = ALLOW_BY
  * Tune az/el/distance to match whatever panorama you shoot — that is the whole
  * authoring job for a hackathon PoI, and it takes about ten minutes.
  */
-const SCENE = {
-  id: 'gap-fill',
-  name: 'Gap fill',
-  scene: { scenicness: 7.5, eventfulness: 5.0 },
-  // Targeted at what segmentation ACTUALLY found in the Hohe Tauern scenes — rock,
-  // snow, scree and glacier dominate, and we recorded none of them. Water and waterfall
-  // are deliberately absent: we have our own, and ours are better.
-  //
-  // Percentages are the share of the view each class covered, from each scene's class report.
-  // Run src/python/audio_prep/check_coverage.py to regenerate this list for new scenes.
-  layers: [
-    // rock — up to 40% of the view. The single biggest hole.
-    { id: 'rock', type: 'region', query: 'wind mountain ridge rock', minDur: 15, maxDur: 90,
-      az: 0, el: 5, spread: 70, distance: 400, gain: -14, focus: 6, tags: ['wind'] },
-    // snow — 18-26% in every scene, and we have nothing at all for it.
-    { id: 'snow', type: 'region', query: 'wind over snow field', minDur: 15, maxDur: 90,
-      az: 60, el: 0, spread: 60, distance: 300, gain: -16, focus: 6 },
-    { id: 'scree', type: 'region', query: 'wind gravel scree slope', minDur: 15, maxDur: 90,
-      az: 300, el: -10, spread: 55, distance: 250, gain: -12, focus: 7 },
-    { id: 'glacier', type: 'region', query: 'glacier ice creaking', minDur: 10, maxDur: 90,
-      az: 20, el: 0, spread: 40, distance: 500, gain: -14, focus: 7 },
-    { id: 'pasture', type: 'region', query: 'alpine meadow insects summer', minDur: 15, maxDur: 90,
-      az: 150, el: -12, spread: 60, distance: 60, gain: -12, focus: 7 },
-    { id: 'built', type: 'region', query: 'wooden hut creak wind', minDur: 10, maxDur: 60,
-      az: 200, el: -5, spread: 30, distance: 150, gain: -18, focus: 8 },
+// What to fetch comes from the scenes themselves when it can.
+//
+// `check_coverage.py --json` walks every scene's class report, works out which sounding
+// classes have no audio wired up, and writes data/audio-needs.json. Reading that keeps
+// the class taxonomy in exactly one place (Python) instead of drifting between two.
+// Without it we fall back to the list below, which is what the Hohe Tauern scenes
+// needed the first time round.
+const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../..');
+const NEEDS_FILE = process.env.NEEDS_FILE || path.join(REPO, 'data', 'audio-needs.json');
 
-    // Events. 2-4 variants each so repetition never becomes audible.
-    { id: 'cattle', type: 'event', query: 'cow bell alps', count: 3, maxDur: 8,
-      az: 150, el: -8, spread: 40, distance: 300, gain: 4, ratePerMin: 6, tags: ['wildlife'] },
-    { id: 'animal', type: 'event', query: 'alpine chough bird call', count: 3, maxDur: 6,
-      az: 330, el: 30, spread: 70, distance: 250, gain: 2, ratePerMin: 3, tags: ['wildlife'] },
-    { id: 'marmot', type: 'event', query: 'marmot whistle', count: 2, maxDur: 5,
-      az: 260, el: -5, spread: 40, distance: 150, gain: 3, ratePerMin: 1.5, tags: ['wildlife'] },
-    { id: 'rockfall', type: 'event', query: 'small rockfall gravel', count: 3, maxDur: 8,
-      az: 300, el: 0, spread: 45, distance: 380, gain: 2, ratePerMin: 1.2 },
-    // Human presence, for the pressure control. Held 40 dB down until it is raised.
-    { id: 'cablecar', type: 'event', query: 'ski lift cable car motor', count: 2, maxDur: 10,
-      az: 60, el: 8, spread: 40, distance: 250, gain: -2, ratePerMin: 4, tags: ['human'] },
-    { id: 'person', type: 'event', query: 'distant hikers voices outdoor', count: 3, maxDur: 8,
-      az: 200, el: -5, spread: 50, distance: 60, gain: -4, ratePerMin: 5, tags: ['human'] },
-  ],
-};
+const FALLBACK = [
+  { id: 'rock',    type: 'region', query: 'wind mountain ridge rock',      minDur: 15, maxDur: 90 },
+  { id: 'snow',    type: 'region', query: 'wind over snow field',          minDur: 15, maxDur: 90 },
+  { id: 'scree',   type: 'region', query: 'wind gravel scree slope',       minDur: 15, maxDur: 90 },
+  { id: 'glacier', type: 'region', query: 'glacier ice creaking',          minDur: 10, maxDur: 90 },
+  { id: 'pasture', type: 'region', query: 'alpine meadow insects summer',  minDur: 15, maxDur: 90 },
+  { id: 'built',   type: 'region', query: 'wooden hut creak wind',         minDur: 10, maxDur: 60 },
+  { id: 'cattle',  type: 'event',  query: 'cow bell alps',                 count: 3, maxDur: 8 },
+  { id: 'animal',  type: 'event',  query: 'alpine chough bird call',       count: 3, maxDur: 6 },
+  { id: 'person',  type: 'event',  query: 'distant hikers voices outdoor', count: 3, maxDur: 8 },
+];
+
+function loadPlan() {
+  if (!existsSync(NEEDS_FILE)) {
+    console.log('No data/audio-needs.json — using the built-in list.');
+    console.log('For a list driven by what your scenes actually contain, run first:');
+    console.log('  python src/python/audio_prep/check_coverage.py --json\n');
+    return FALLBACK;
+  }
+  const { needs } = JSON.parse(readFileSync(NEEDS_FILE, 'utf8'));
+  console.log(`${needs.length} class(es) missing audio, from ${path.relative(REPO, NEEDS_FILE)}:`);
+  for (const n of needs) {
+    console.log(`  ${String(n.max_share_percent).padStart(3)}%  ${n.class.padEnd(10)} `
+      + `${n.type.padEnd(6)} "${n.query}"  (${n.scenes.length} scene(s))`);
+  }
+  console.log();
+  return needs.map((n) => ({
+    id: n.class,
+    type: n.type,
+    query: n.query,
+    count: n.count ?? (n.type === 'event' ? 3 : 1),
+    minDur: n.min_seconds ?? (n.type === 'event' ? 0 : 15),
+    maxDur: n.max_seconds ?? (n.type === 'event' ? 8 : 90),
+  }));
+}
+
+const PLAN = loadPlan();
 
 const API = 'https://freesound.org/apiv2/search/text/';
 
-async function search(query, { minDur = 0, maxDur = 60, count = 1 }) {
-  const filter = [
-    `license:${LICENSES}`,
-    `duration:[${minDur} TO ${maxDur}]`,
-    'type:(wav OR flac OR aiff OR mp3)',
-  ].join(' ');
+async function searchOnce(query, { minDur, maxDur, count }) {
+  const filter = [`license:${LICENSES}`, 'type:(wav OR flac OR aiff OR mp3)'];
+  if (minDur != null && maxDur != null) filter.push(`duration:[${minDur} TO ${maxDur}]`);
 
   const url = new URL(API);
   url.searchParams.set('query', query);
-  url.searchParams.set('filter', filter);
+  url.searchParams.set('filter', filter.join(' '));
   url.searchParams.set('sort', 'rating_desc');
   url.searchParams.set('page_size', String(Math.max(count * 3, 8)));
   url.searchParams.set('fields', 'id,name,username,license,duration,previews,avg_rating');
@@ -102,8 +108,35 @@ async function search(query, { minDur = 0, maxDur = 60, count = 1 }) {
 
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Freesound ${res.status}: ${await res.text()}`);
-  const json = await res.json();
-  return (json.results ?? []).slice(0, count);
+  return ((await res.json()).results ?? []).slice(0, count);
+}
+
+/**
+ * Try progressively looser searches rather than giving up.
+ *
+ * "wind gusts exposed ridge" with a 15-90 s duration filter matches nothing, which says
+ * the query was too specific — not that Freesound has no mountain wind. So: relax the
+ * duration filter first (it is the most arbitrary constraint), then shorten the query a
+ * word at a time. Report which attempt actually worked so the query table can be fixed.
+ */
+async function search(query, opts) {
+  const words = query.split(/\s+/);
+  const attempts = [
+    { q: query, dur: true, why: 'exact' },
+    { q: query, dur: false, why: 'any duration' },
+  ];
+  if (words.length > 2) attempts.push({ q: words.slice(0, 2).join(' '), dur: false, why: `"${words.slice(0, 2).join(' ')}"` });
+  if (words.length > 1) attempts.push({ q: words[0], dur: false, why: `"${words[0]}"` });
+
+  for (const a of attempts) {
+    const hits = await searchOnce(a.q, {
+      count: opts.count,
+      minDur: a.dur ? opts.minDur : null,
+      maxDur: a.dur ? opts.maxDur : null,
+    });
+    if (hits.length) return { hits, why: a.why };
+  }
+  return { hits: [], why: null };
 }
 
 async function download(url, dest) {
@@ -115,28 +148,30 @@ async function download(url, dest) {
 // Downloads are SOURCE material, so they live beside our own recordings under
 // resources/ — not in data/scenes/, which holds only what the pipeline generates.
 // prepare_audio.py then turns them into scene layers exactly as it does our own takes.
-const here = path.dirname(new URL(import.meta.url).pathname);
 const outDir = process.env.OUT_DIR
   ? path.resolve(process.env.OUT_DIR)
-  : path.resolve(here, '../../../resources/sounds-freesound');
+  : path.join(REPO, 'resources', 'sounds-freesound');
 if (!existsSync(outDir)) await mkdir(outDir, { recursive: true });
 
 const credits = [];
 const manifestLayers = [];
+const relaxed = [];
+const missing = [];
 
-for (const spec of SCENE.layers) {
+for (const spec of PLAN) {
   const { query, count = 1, minDur, maxDur, ...layer } = spec;
   process.stdout.write(`  ${spec.id.padEnd(12)} "${query}" … `);
 
-  let hits = [];
+  let hits = [], why = null;
   try {
-    hits = await search(query, { minDur, maxDur, count });
+    ({ hits, why } = await search(query, { minDur, maxDur, count }));
   } catch (err) {
     console.log(`FAILED (${err.message})`);
     continue;
   }
   if (!hits.length) {
-    console.log('no results — widen the query or add --allow-by');
+    console.log('no results even after relaxing — try a different query for this class');
+    missing.push(spec.id);
     continue;
   }
 
@@ -151,16 +186,19 @@ for (const spec of SCENE.layers) {
     });
   }
 
-  manifestLayers.push({ ...layer, src: files.length === 1 ? files[0] : files });
-  console.log(`${files.length} file(s) — ${hits[0].license}`);
+  manifestLayers.push({ id: spec.id, type: spec.type, src: files });
+  console.log(`${files.length} file(s) — ${hits[0].license}`
+    + (why === 'exact' ? '' : `  [relaxed to ${why}]`));
+  if (why !== 'exact') relaxed.push(`${spec.id}: ${why}`);
 }
 
-// Reference only — prepare_audio.py derives the real geometry from the filenames.
-await writeFile(path.join(outDir, 'suggested-layers.json'),
-                JSON.stringify({ layers: manifestLayers }, null, 2));
+// Reference only — prepare_audio.py derives the real geometry from the filenames, and
+// build_scene_layers.py replaces it with the geometry segmentation actually measured.
+await writeFile(path.join(outDir, 'fetched.json'),
+                JSON.stringify({ fetched: manifestLayers }, null, 2));
 
 const creditsMd = [
-  `# Audio credits — ${SCENE.name}`,
+  `# Audio credits — gap-fill downloads`,
   '',
   'Sourced from Freesound. Creative Commons 0 needs no attribution;',
   'Attribution-licensed sounds must be credited wherever the app is published.',
@@ -173,6 +211,15 @@ const creditsMd = [
 await writeFile(path.join(outDir, 'CREDITS.md'), creditsMd);
 
 console.log(`\nDone. ${credits.length} files in ${outDir}`);
+if (relaxed.length) {
+  console.log(`\n${relaxed.length} query(ies) only matched after relaxing — worth editing`);
+  console.log('QUERIES in src/python/image_analysis/segment_panorama.py:');
+  for (const r of relaxed) console.log(`  ${r}`);
+}
+if (missing.length) {
+  console.log(`\nStill nothing for: ${missing.join(', ')}`);
+  console.log('Edit their QUERIES entries, or record them yourselves.');
+}
 console.log('\nNow turn them into scene layers, same as our own recordings:');
 console.log('  python src/python/audio_prep/prepare_audio.py \\');
 console.log('      --in resources/sounds-freesound --scene hohe-tauern\n');

@@ -227,7 +227,27 @@ def encode(y, sr, dest, channels):
                    capture_output=True, timeout=600)
 
 
-def classify(stem):
+def geom_for_class(cls):
+    """Starting geometry for a class name, from the same table the filename hints use."""
+    for _pattern, name, geom in HINTS:
+        if name == cls:
+            return dict(geom)
+    return None
+
+
+def classify(stem, labels=None):
+    """
+    An explicit label wins over a filename guess. survey_recordings.py writes
+    labels.json by measuring what is actually in each take, which beats hoping somebody
+    renamed R07_0021.WAV in the field.
+    """
+    if labels:
+        entry = labels.get(stem) or labels.get(f"{stem}.WAV") or labels.get(f"{stem}.wav")
+        if entry:
+            cls = entry.get("class") if isinstance(entry, dict) else entry
+            if cls:
+                return cls, (geom_for_class(cls) or
+                             dict(az=0, el=0, spread=50, distance=80, gain=-10, focus=8))
     low = stem.lower()
     for pattern, cls, geom in HINTS:
         if re.search(pattern, low):
@@ -248,6 +268,11 @@ def main():
                     help="only these recordings (filenames or glob patterns). Without it "
                          "EVERY file in --in becomes a layer, which for two dozen takes "
                          "means two dozen loops playing at once.")
+    ap.add_argument("--labels", default=None,
+                    help="JSON mapping filename -> class, from survey_recordings.py "
+                         "(default: labels.json in the input folder, if present)")
+    ap.add_argument("--include-unusable", action="store_true",
+                    help="process takes labels.json marked unusable")
     ap.add_argument("--labelled-only", action="store_true",
                     help="use only recordings whose filename matches a hint (…_water, "
                          "…_waterfall, …_footsteps). The fast way to a clean first mix.")
@@ -259,6 +284,12 @@ def main():
     args = ap.parse_args()
 
     need("ffmpeg"); need("ffprobe")
+
+    labels = {}
+    labels_file = Path(args.labels) if args.labels else Path(args.src) / "labels.json"
+    if labels_file.exists():
+        labels = json.loads(labels_file.read_text())
+        print(f"using {rel(labels_file)} ({len(labels)} labelled take(s))\n")
 
     src = Path(args.src)
     out_dir = Path(args.out) / args.scene          # scene.json lives here
@@ -277,7 +308,7 @@ def main():
                 chosen.append(p_)
         wavs = chosen
     if args.labelled_only:
-        wavs = [p_ for p_ in wavs if classify(p_.stem)[0] is not None]
+        wavs = [p_ for p_ in wavs if classify(p_.stem, labels)[0] is not None]
     if not wavs:
         sys.exit(f"no recordings selected in {src}")
     if len(wavs) > 12 and not (args.pick or args.labelled_only):
@@ -296,12 +327,18 @@ def main():
             print(f"  {path.name:<28} SKIPPED — could not read duration")
             continue
         print(f"  {path.name:<28} {dur:6.1f}s  …", end="\r", flush=True)
-        cls, geom = classify(path.stem)
+        entry = labels.get(path.name) if labels else None
+        if isinstance(entry, dict) and entry.get("usable") is False and not args.include_unusable:
+            skipped.append((path.name, f"labelled unusable ({entry.get('guess', '?')})"))
+            print(f"  {path.name:<28} {dur:6.1f}s  skipped — labelled unusable")
+            continue
+        cls, geom = classify(path.stem, labels)
         is_event = dur <= args.event_max_seconds
         name = cls or path.stem.lower().replace("_", "-")
         # Only avoid collisions WITHIN this run. Colliding with a file from a previous
         # run means the same recording again, so overwrite it — otherwise every re-run
         # silently duplicates every layer as water-2, water-3, ...
+        base_class = name          # before any -2 suffix: this is what groups takes
         if name in used_names:
             k = 2
             while f"{name}-{k}" in used_names:
@@ -346,7 +383,8 @@ def main():
         # Relative from the scene folder to the shared pool, so it resolves the same
         # whether the app is served from the repo root or anywhere else.
         rel_src = os.path.relpath(dest, out_dir).replace(os.sep, "/")
-        layer = {"id": dest.stem, "type": kind, "src": rel_src}
+        layer = {"id": dest.stem, "type": kind, "src": rel_src,
+                 "_class": base_class, "_dur": dur}
         if geom:
             layer.update(geom)
         else:
@@ -359,6 +397,40 @@ def main():
     if not layers:
         sys.exit("\nNo recordings could be converted — nothing written. "
                  "Check the errors above.")
+
+    # Several takes of the same thing are not several sources.
+    #
+    # For a REGION that would be four footstep loops playing at once from the same
+    # direction — mud, and 6 dB too loud. Keep the longest take; the others stay in the
+    # pool, unused, in case you prefer one by ear.
+    #
+    # For an EVENT the opposite is true: variants are what stop a cowbell sounding like
+    # a sample. They collapse into ONE layer whose scheduler picks among them, which is
+    # what the engine's `src` array is for.
+    grouped, extras = {}, []
+    for l in layers:
+        cls = l.pop("_class")
+        dur = l.pop("_dur")
+        g = grouped.setdefault(cls, [])
+        g.append((dur, l))
+    merged = []
+    for cls, items in grouped.items():
+        items.sort(key=lambda t: -t[0])
+        first = items[0][1]
+        if first["type"] == "event" and len(items) > 1:
+            first["src"] = [i[1]["src"] for i in items]
+            first["id"] = cls
+            merged.append(first)
+            print(f"  {cls}: {len(items)} variants in one event layer")
+        else:
+            first["id"] = cls
+            merged.append(first)
+            for _d, other in items[1:]:
+                extras.append(other["id"])
+    layers = merged
+    if extras:
+        print(f"\n{len(extras)} extra take(s) kept in the pool but not wired up "
+              f"(one loop per region is enough): " + ", ".join(extras[:6]))
     layers.sort(key=lambda l: {"bed": 0, "region": 1, "event": 2}[l["type"]])
 
     # Merge into an existing scene.json rather than replacing it: ingest_images.py may

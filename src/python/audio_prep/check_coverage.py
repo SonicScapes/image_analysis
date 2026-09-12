@@ -73,6 +73,10 @@ def main():
     ap.add_argument("--scene", default=None, help="just this one")
     ap.add_argument("--queries", action="store_true",
                     help="print a Freesound query per gap, ready to paste")
+    ap.add_argument("--json", dest="json_out", nargs="?", const="data/audio-needs.json",
+                    default=None,
+                    help="write the gaps as JSON for fetch-sounds.mjs to consume "
+                         "(default path: data/audio-needs.json)")
     ap.add_argument("--min-percent", type=int, default=1,
                     help="ignore classes below this share (default %(default)s)")
     args = ap.parse_args()
@@ -81,7 +85,7 @@ def main():
     dirs = ([root / args.scene] if args.scene
             else sorted(d for d in root.iterdir() if d.is_dir()))
 
-    all_gaps = {}
+    all_gaps, gap_scenes = {}, {}
     for d in dirs:
         # The report is named after the source image (IMG_1234_classes.txt); older
         # scenes used a fixed name, so accept both.
@@ -111,6 +115,7 @@ def main():
                 kind = spec[0] if spec else "unknown class"
                 print(f"  {pct:>3}%  {cls:<12} MISSING ({kind})")
                 all_gaps[cls] = max(all_gaps.get(cls, 0), pct)
+                gap_scenes.setdefault(cls, []).append(d.name)
         print(f"        {covered_share}% of the view has sound, {gap_share}% does not")
 
     if all_gaps:
@@ -127,6 +132,35 @@ def main():
                       f"az: 0, el: 0, spread: 50, distance: {spec[3]}, gain: {spec[1]} }},")
     else:
         print("\nEvery sounding class in every scene has audio attached.")
+
+    if args.json_out:
+        # The class taxonomy lives in Python. Export what is missing so the JavaScript
+        # fetcher does not have to keep its own copy of it and drift.
+        out = Path(args.json_out)
+        if not out.is_absolute():
+            out = REPO / out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        needs = []
+        for cls, pct in sorted(all_gaps.items(), key=lambda t: -t[1]):
+            spec = SOUND_SPEC.get(cls, ("region", -8, 8, 200, 0.02))
+            kind = spec[0] or "region"
+            needs.append({
+                "class": cls,
+                "type": kind,
+                "query": QUERIES.get(cls, cls),
+                "max_share_percent": pct,
+                "scenes": sorted(set(gap_scenes.get(cls, []))),
+                "gain": spec[1],
+                "distance": spec[3],
+                # Events want several takes so the scheduler can vary them; a region
+                # only ever plays one loop.
+                "count": 3 if kind == "event" else 1,
+                "max_seconds": 8 if kind == "event" else 90,
+                "min_seconds": 0 if kind == "event" else 15,
+            })
+        out.write_text(json.dumps({"needs": needs}, indent=2))
+        print(f"\nwrote {out} ({len(needs)} class(es) to fetch)")
+        print("  node src/js/tools/fetch-sounds.mjs")
 
 
 if __name__ == "__main__":

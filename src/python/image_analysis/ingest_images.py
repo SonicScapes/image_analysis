@@ -61,6 +61,17 @@ JPEG_QUALITY = 84
 SENSOR_MM = 36.0  # 35 mm equivalent frame width
 
 
+def _refresh_index(scenes_dir):
+    """The viewer cannot list a directory over HTTP, so keep an index file current."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from scene_index import write_index
+        dest, entries = write_index(scenes_dir)
+        print(f"index: {len(entries)} scene(s) -> {rel(dest)}")
+    except Exception as e:
+        print(f"note: could not write the scene index ({e})")
+
+
 def slug(name):
     """Folder-and-URL-safe version of a filename stem. Scene ids end up in URLs."""
     out = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
@@ -381,7 +392,7 @@ def main():
     if not files:
         sys.exit("nothing left to do — every image is already segmented.")
 
-    views, failures = [], []
+    views, failures, each_ids = [], [], []
     print(f"{len(files)} image(s) from {src}\n")
     print(f"  {'file':<26} {'projection':<12} {'hfov':>6} {'bearing':>8} {'alt':>7}  how")
 
@@ -424,6 +435,21 @@ def main():
         v["source"] = path.name
         v["path"] = path
         v["img"] = img
+
+        # --each: write this scene NOW, then let the image go.
+        #
+        # Two reasons, and the second is the serious one. Deferring every write to a
+        # second loop means nothing appears on disk until the whole run finishes, so an
+        # interrupted run leaves nothing. And holding every decoded image until then
+        # costs ~215 MB each — thirteen 71-megapixel panoramas is 2.8 GB of RSS, which
+        # on a laptop means swapping, which looks exactly like the tool having hung.
+        if args.each and not args.catalog:
+            scene_id = (f"{args.scene}-{len(each_ids) + 1}" if args.number
+                        else slug(path.stem))
+            build_scene(v, Path(args.out) / scene_id, scene_id, args.name)
+            each_ids.append(scene_id)
+            img.close()
+            v.pop("img", None)
         views.append(v)
 
     if not views:
@@ -472,14 +498,9 @@ def main():
 
     # ---------------------------------------------------------------- one scene each
     if args.each:
-        print()
-        ids = []
-        for n, v in enumerate(views, 1):
-            scene_id = (f"{args.scene}-{n}" if args.number
-                        else slug(Path(v["source"]).stem))
-            ids.append(scene_id)
-            build_scene(v, Path(args.out) / scene_id, scene_id, args.name)
-        print(f"\n{len(views)} scene(s) written under {rel(Path(args.out))}")
+        ids = each_ids
+        print(f"\n{len(ids)} scene(s) written under {rel(Path(args.out))}")
+        _refresh_index(Path(args.out))
         print("\nSegment them all:")
         print("  for d in " + " ".join(f"data/scenes/{i}" for i in ids[:3])
               + (" ..." if len(ids) > 3 else "") + "; do")
@@ -498,7 +519,12 @@ def main():
     # The widest view becomes the scene's main image — that's the one worth panning.
     views.sort(key=lambda v: -v["hfov_deg"])
     main_view = views[0]
+    for v in views[1:]:                      # the rest are decoded pixels we never use
+        if v.get("img") is not None:
+            v["img"].close()
+            v["img"] = None
     build_scene(main_view, out_dir, args.scene, args.name, verbose=True)
+    _refresh_index(Path(args.out))
     if failures:
         print()
         for name, why in failures:

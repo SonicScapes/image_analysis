@@ -30,8 +30,13 @@ const stage = $('stage');
 const strip = $('strip');
 const engine = new SoundscapeEngine();
 
+// Handy in the console: __soundscapes.engine.getDebug(), .engine.setMood({...}), .scene
+window.__soundscapes = { engine, get scene() { return scene; },
+                         get sceneList() { return sceneList; } };
+
 let scene = null;
 let pano = null;
+let sceneBase = BASE_URL;
 let img = { w: 1, h: 1 };
 let pan = { x: 0, y: 0 };
 let zoom = 1;
@@ -40,8 +45,27 @@ let dragging = false, last = { x: 0, y: 0 }, useGyro = false;
 /* ------------------------------------------------------------------ geometry */
 
 /** Scale at which the image covers the stage, times the zoom factor. */
+function baseScale() {
+  return Math.max(stage.clientHeight / img.h, stage.clientWidth / img.w);
+}
+
 function coverScale() {
-  return Math.max(stage.clientHeight / img.h, stage.clientWidth / img.w) * zoom;
+  return baseScale() * zoom;
+}
+
+/**
+ * Choose the zoom that gives a human field of view.
+ *
+ * Without this a 360 opens at zoom 1, which fits the whole equirect across the window —
+ * 288 degrees at once. That is a picture OF a panorama, not standing in one, and it also
+ * flattens the audio: with everything visible at once, nothing is ever out of view, so
+ * the mix barely moves as you pan. Around 75 degrees is roughly what a person sees.
+ */
+const TARGET_FOV = 75;
+function fitZoom(target = TARGET_FOV) {
+  if (!pano || pano.hfov_deg <= target) { zoom = 1; return; }
+  const need = (pano.hfov_deg * stage.clientWidth) / (target * img.w);
+  zoom = clamp(need / baseScale(), 1, 24);
 }
 
 function maxPan() {
@@ -103,7 +127,7 @@ stage.addEventListener('pointercancel', endDrag);
 stage.addEventListener('wheel', (e) => {
   e.preventDefault();
   const before = coverScale();
-  zoom = clamp(zoom * (e.deltaY > 0 ? 0.92 : 1.08), 1, 4);
+  zoom = clamp(zoom * (e.deltaY > 0 ? 0.92 : 1.08), 1, 24);
   // Keep the point under the cursor fixed while zooming.
   const k = coverScale() / before;
   pan.x = (pan.x + e.clientX) * k - e.clientX;
@@ -111,7 +135,7 @@ stage.addEventListener('wheel', (e) => {
   applyTransform();
 }, { passive: false });
 
-addEventListener('resize', applyTransform);
+addEventListener('resize', () => { fitZoom(); applyTransform(); });
 
 if (typeof DeviceOrientationEvent !== 'undefined' && 'ontouchstart' in window) {
   $('gyroBtn').hidden = false;
@@ -142,58 +166,125 @@ if (typeof DeviceOrientationEvent !== 'undefined' && 'ontouchstart' in window) {
  * but geometry, visibility, meters and compass all still run, which is what you want
  * when checking whether a region is pointing where you think it is.
  */
+let sceneList = [];
+let sceneIdx = 0;
+let silentMode = false;
+
+/**
+ * Boot: read the scene index, then open one. The index exists because a browser cannot
+ * list a directory over HTTP; `scene_index.py` writes it and every tool that creates a
+ * scene refreshes it.
+ */
 async function boot(silent) {
-  const btn = silent ? $('exploreBtn') : $('startBtn');
+  silentMode = silent;
   $('startBtn').disabled = true;
   $('exploreBtn').disabled = true;
   try {
-    $('status').textContent = 'loading…';
-    scene = await (await fetch(SCENE_URL)).json();
-    pano = scene.panorama;
-    if (!pano) throw new Error('scene.json has no "panorama" block — run ingest_images.py');
-    if (!silent && !scene.layers?.length) {
-      throw new Error('scene.json has no layers — run prepare_audio.py');
+    try {
+      const res = await fetch(new URL('../', new URL(BASE_URL, location.href)).href + 'index.json');
+      if (res.ok) sceneList = (await res.json()).scenes ?? [];
+    } catch { /* no index: fall back to the single scene in the URL */ }
+
+    const wanted = SCENE_URL.split('/').slice(-2, -1)[0];
+    sceneIdx = Math.max(0, sceneList.findIndex((s) => s.id === wanted));
+    if (sceneList.length) {
+      $('sceneNav').hidden = false;
+      $('sceneSelect').innerHTML = sceneList.map((s, i) =>
+        `<option value="${i}">${i + 1}/${sceneList.length}  ${s.name}` +
+        `${s.layers ? '' : '  (no audio)'}</option>`).join('');
     }
-    pano.vfov_deg = pano.vfov_deg ?? pano.hfov_deg / 2;
 
-    await loadImage(BASE_URL + pano.file);
-    await engine.loadScene({ ...scene, layers: scene.layers ?? [] }, {
-      baseUrl: BASE_URL,
-      silent,
-      onProgress: (d, t) => { $('status').textContent = `loading sounds… ${d}/${t}`; },
-    });
-    await engine.start();
+    await openScene(sceneIdx);
     $('silentBadge').hidden = !silent;
-
-    // Open looking at the middle of the image, not at its left edge.
-    const m = maxPan();
-    pan = { x: m.x / 2, y: m.y / 2 };
-    applyTransform();
-
-    $('poiName').textContent = scene.name ?? scene.id;
-    $('scenic').value = scene.scene?.scenicness ?? 8;
-    $('scenicVal').textContent = (+$('scenic').value).toFixed(1);
-    $('pressure').value = scene.scene?.pressure ?? 0;
-    $('pressureVal').textContent = (+$('pressure').value).toFixed(1);
-    buildRows();
-    for (const el of ['title', 'meters', 'compass', 'controls']) $(el).hidden = false;
     $('gate').style.display = 'none';
-    await detectSources();
     frame();
   } catch (err) {
     $('startBtn').disabled = false;
     $('exploreBtn').disabled = false;
     $('status').textContent = err.message;
-    const hint = /no layers/.test(err.message)
-      ? 'Run:  python src/python/audio_prep/prepare_audio.py --scene ' +
-        (SCENE_URL.split('/').slice(-2, -1)[0] || 'hohe-tauern') + ' --labelled-only'
-      : /could not load|Failed to fetch|NetworkError/.test(err.message)
-        ? 'Serve the repo ROOT over http (npm run dev), not the app folder, and not file://'
-        : 'Check the console (Cmd+Opt+J) for the full trace.';
+    const hint = /could not load|Failed to fetch|NetworkError/.test(err.message)
+      ? 'Serve the repo ROOT over http (npm run dev), not the app folder, and not file://'
+      : 'Check the console (Cmd+Opt+J) for the full trace.';
     fail(`<b>${err.message}</b><br>${hint}`);
     console.error('[soundscapes]', err);
   }
 }
+
+/** Open scene `i` from the index, or the URL's scene when there is no index. */
+async function openScene(i) {
+  const entry = sceneList[i];
+  const base = entry
+    ? new URL(`../${entry.id}/`, new URL(BASE_URL, location.href)).href
+    : new URL(BASE_URL, location.href).href;
+  const url = base + 'scene.json';
+
+  $('status').textContent = 'loading…';
+  const next = await (await fetch(url)).json();
+  if (!next.panorama) throw new Error('scene.json has no "panorama" block — run ingest_images.py');
+  next.panorama.vfov_deg = next.panorama.vfov_deg ?? next.panorama.hfov_deg / 2;
+
+  if (engine.running) await engine.stop(0.25);
+  scene = next;
+  pano = next.panorama;
+  sceneIdx = i;
+  sceneBase = base;
+
+  strip.innerHTML = '';
+  await loadImage(base + pano.file);
+
+  // A scene with no layers is normal while audio is still being built — open it anyway
+  // and say so, rather than refusing to show the panorama.
+  const layers = scene.layers ?? [];
+  $('noAudio').hidden = layers.length > 0;
+  await engine.loadScene({ ...scene, layers }, {
+    baseUrl: base,
+    silent: silentMode || layers.length === 0,
+    onProgress: (d, t) => { $('status').textContent = `loading sounds… ${d}/${t}`; },
+  });
+  await engine.start();
+
+  fitZoom();
+  const m = maxPan();
+  pan = { x: m.x / 2, y: m.y / 2 };
+  applyTransform();
+
+  $('poiName').textContent = scene.name ?? scene.id;
+  $('scenic').value = scene.scene?.scenicness ?? 8;
+  $('scenicVal').textContent = (+$('scenic').value).toFixed(1);
+  $('pressure').value = scene.scene?.pressure ?? 0;
+  $('pressureVal').textContent = (+$('pressure').value).toFixed(1);
+  if (sceneList.length) $('sceneSelect').value = String(i);
+  buildRows();
+  for (const el of ['title', 'meters', 'compass', 'controls']) $(el).hidden = false;
+  currentSource = 'srcPhoto';
+  for (const k of Object.keys(SOURCES)) $(k).setAttribute('aria-pressed', String(k === 'srcPhoto'));
+  $('srcNote').hidden = true;
+  await detectSources();
+}
+
+async function gotoScene(delta) {
+  if (!sceneList.length) return;
+  const i = (sceneIdx + delta + sceneList.length) % sceneList.length;
+  try {
+    await openScene(i);
+  } catch (err) {
+    fail(`${sceneList[i]?.id}: ${err.message}`);
+  }
+}
+
+$('prevScene').addEventListener('click', () => gotoScene(-1));
+$('nextScene').addEventListener('click', () => gotoScene(1));
+$('sceneSelect').addEventListener('change', (e) => {
+  openScene(+e.target.value).catch((err) => fail(err.message));
+});
+
+addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowLeft' || e.key === '[') { e.preventDefault(); gotoScene(-1); }
+  if (e.key === 'ArrowRight' || e.key === ']') { e.preventDefault(); gotoScene(1); }
+  const n = ['srcPhoto', 'srcOverlay', 'srcNamed', 'srcLabels'][+e.key - 1];
+  if (n) setSource(n);
+});
 
 $('startBtn').addEventListener('click', () => boot(false));
 $('exploreBtn').addEventListener('click', () => boot(true));
@@ -208,16 +299,22 @@ const SOURCES = {
 };
 let currentSource = 'srcPhoto';
 
+const INDEX_FLAG = { srcOverlay: 'overlay', srcNamed: 'overlay_labeled', srcLabels: 'labels' };
+
 async function detectSources() {
+  const entry = sceneList[sceneIdx];
   for (const id of Object.keys(SOURCES)) {
     if (id === 'srcPhoto') continue;
-    try {
-      const r = await fetch(BASE_URL + SOURCES[id].file(), { method: 'HEAD' });
-      $(id).disabled = !r.ok;
-      if (!r.ok) $(id).title = 'not generated yet — run segment_panorama.py';
-    } catch {
-      $(id).disabled = true;
+    let ok;
+    if (entry && INDEX_FLAG[id] in entry) {
+      ok = !!entry[INDEX_FLAG[id]];          // the index already knows
+    } else {
+      try {
+        ok = (await fetch(sceneBase + SOURCES[id].file(), { method: 'HEAD' })).ok;
+      } catch { ok = false; }
     }
+    $(id).disabled = !ok;
+    $(id).title = ok ? SOURCES[id].label : 'not generated yet — run segment_panorama.py';
   }
 }
 
@@ -226,7 +323,7 @@ async function setSource(id) {
   const prevAspect = img.w / img.h;
   try {
     strip.innerHTML = '';
-    await loadImage(BASE_URL + SOURCES[id].file());
+    await loadImage(sceneBase + SOURCES[id].file());
   } catch (err) {
     fail(`Could not load ${SOURCES[id].file()} — ${err.message}`);
     return;
@@ -287,11 +384,20 @@ function buildRows() {
   const host = $('rows');
   host.innerHTML = '';
   for (const l of engine.getDebug()) {
-    const row = document.createElement('div');
-    row.className = 'row ' + l.type;
-    row.innerHTML = `<span class="lbl">${l.id}</span><span class="bar"><i></i></span><span class="db">—</span>`;
-    host.appendChild(row);
-    rowEls.set(l.id, { row, fill: row.querySelector('i'), db: row.querySelector('.db') });
+    const wrap = document.createElement('div');
+    wrap.className = 'mrow ' + l.type;
+    const files = l.files.length > 1 ? `${l.files[0]} +${l.files.length - 1}` : (l.files[0] ?? '—');
+    wrap.innerHTML =
+      `<div class="row ${l.type}"><span class="lbl">${l.id}</span>` +
+      `<span class="bar"><i></i></span><span class="db">—</span></div>` +
+      `<div class="sub"><span class="file" title="${l.files.join(', ')}">${files}</span>` +
+      `<span class="pct">—</span></div>`;
+    host.appendChild(wrap);
+    rowEls.set(l.id, {
+      row: wrap.querySelector('.row'), wrap,
+      fill: wrap.querySelector('i'), db: wrap.querySelector('.db'),
+      pct: wrap.querySelector('.pct'),
+    });
   }
 }
 
@@ -325,6 +431,9 @@ function frame() {
   engine.setView(view);
 
   const debug = engine.getDebug();
+  // Share of the mix: power, normalised across whatever is currently audible. An event
+  // only counts while it is sounding, which is why its share blinks.
+  const totalPower = debug.reduce((s, l) => s + l.power, 0) || 1;
   for (const l of debug) {
     const el = rowEls.get(l.id);
     if (!el) continue;
@@ -332,6 +441,10 @@ function frame() {
     el.db.textContent = l.type === 'event'
       ? (l.visibility * 100).toFixed(0) + '%'
       : l.gainDb.toFixed(0);
+    const share = (l.power / totalPower) * 100;
+    el.pct.textContent = l.power > 0
+      ? (share < 1 ? '<1%' : share.toFixed(0) + '%')
+      : (l.type === 'event' ? 'idle' : '—');
     el.row.classList.toggle('fired', engine.now() - l.lastEventAt < 0.5);
   }
   drawCompass(debug, view);

@@ -339,16 +339,29 @@ export class SoundscapeEngine {
 
   /** Per-layer state, for meters / an overlay. Cheap enough to call every frame. */
   getDebug() {
-    return this.layers.map((l) => ({
-      id: l.id,
-      type: l.type,
-      az: l.az,
-      el: l.el,
-      distance: l.distance,
-      visibility: l.vis ?? 0,
-      gainDb: l.currentDb ?? -120,
-      lastEventAt: l.lastEventAt ?? 0,
-    }));
+    const now = this._now();
+    return this.layers.map((l) => {
+      // An event only contributes to the mix while it is actually sounding.
+      const firing = l.type === 'event' && now - (l.lastEventAt ?? 0) < 1.5;
+      const db = l.type === 'event'
+        ? (firing ? this._layerDb(l, l.vis ?? 0) : -120)
+        : (l.currentDb ?? -120);
+      return {
+        id: l.id,
+        type: l.type,
+        az: l.az,
+        el: l.el,
+        distance: l.distance,
+        visibility: l.vis ?? 0,
+        gainDb: l.currentDb ?? -120,
+        // Power, for working out each layer's share of what you are hearing.
+        power: db > -60 ? Math.pow(10, db / 10) : 0,
+        firing,
+        files: (l.srcList ?? [].concat(l.src ?? [])).map(
+          (u) => String(u).split('/').pop().split('?')[0]),
+        lastEventAt: l.lastEventAt ?? 0,
+      };
+    });
   }
 
   // ----------------------------------------------------------------- internal

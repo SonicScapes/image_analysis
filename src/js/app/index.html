@@ -14,6 +14,9 @@
     --teal: #58B9BE; --moss: #92B981; --amber: #E09257;
   }
   * { box-sizing: border-box; }
+  /* An id rule with `display` beats the browser's [hidden] { display: none }, so every
+     hidden badge stayed visible. Make the attribute win. */
+  [hidden] { display: none !important; }
   html, body { height: 100%; }
   body {
     margin: 0; background: #0B100F; color: var(--ink); overflow: hidden;
@@ -64,10 +67,17 @@
   #title .s { font-family: "IBM Plex Mono", monospace; font-size: .7rem; color: var(--muted);
     letter-spacing: .08em; text-transform: uppercase; margin-top: .22rem; }
 
-  #meters { top: 16px; right: 16px; width: 16rem; padding: .8rem .9rem; max-height: 60vh; overflow-y: auto; }
+  #meters { top: 16px; right: 16px; width: 19rem; padding: .8rem .9rem; max-height: 60vh; overflow-y: auto; }
   #meters h2 { font-family: "IBM Plex Mono", monospace; font-size: .64rem; letter-spacing: .13em;
     text-transform: uppercase; color: var(--faint); margin: 0 0 .6rem; font-weight: 500; }
-  .row { display: grid; grid-template-columns: 4.8rem 1fr 2.4rem; gap: .45rem; align-items: center; margin-bottom: .32rem; }
+  .mrow { margin-bottom: .5rem; }
+  .row { display: grid; grid-template-columns: 4.8rem 1fr 2.4rem; gap: .45rem; align-items: center; }
+  .sub { display: flex; justify-content: space-between; gap: .5rem;
+         font-family: "IBM Plex Mono", monospace; font-size: .6rem; color: var(--faint);
+         padding-left: 5.25rem; margin-top: .12rem; }
+  .sub .file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sub .pct { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+  .mrow.event .sub .pct { color: var(--amber); }
   .row .lbl { font-family: "IBM Plex Mono", monospace; font-size: .68rem; color: var(--muted);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bar { height: 5px; background: rgba(230,236,232,.1); border-radius: 3px; overflow: hidden; }
@@ -77,6 +87,24 @@
   .row .db { font-family: "IBM Plex Mono", monospace; font-size: .63rem; color: var(--faint);
     text-align: right; font-variant-numeric: tabular-nums; }
   .row.fired .lbl { color: var(--amber); }
+
+  .nav { display: flex; gap: .35rem; align-items: center; margin-top: .6rem; }
+  .nav button {
+    font-family: "IBM Plex Mono", monospace; font-size: .85rem; line-height: 1;
+    width: 1.7rem; height: 1.7rem; border: 1px solid var(--line); border-radius: 3px;
+    background: rgba(11,17,16,.9); color: var(--muted); cursor: pointer;
+  }
+  .nav button:hover:not(:disabled) { color: var(--teal); border-color: var(--teal); }
+  .nav button:disabled { opacity: .3; cursor: not-allowed; }
+  .nav select {
+    flex: 1; min-width: 0; font-family: "IBM Plex Mono", monospace; font-size: .68rem;
+    background: rgba(11,17,16,.9); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 3px; padding: .28rem .3rem;
+  }
+  #noAudio { display: inline-block; font-family: "IBM Plex Mono", monospace;
+    font-size: .58rem; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--faint); border: 1px solid var(--line); border-radius: 2px;
+    padding: .08rem .3rem; margin-left: .4rem; }
 
   .seg { display: flex; gap: 1px; margin-top: .55rem; background: var(--line);
          border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
@@ -132,8 +160,13 @@
 <div id="vignette"></div>
 
 <div id="title" class="hud" hidden>
-  <div class="n"><span id="poiName">—</span><span id="silentBadge" hidden>silent</span></div>
+  <div class="n"><span id="poiName">—</span><span id="silentBadge" hidden>silent</span><span id="noAudio" hidden>no audio</span></div>
   <div class="s">bearing <span id="bearing">0°</span> · <span id="fovOut">0°</span> field of view</div>
+  <div class="nav" id="sceneNav" hidden>
+    <button id="prevScene" title="Previous scene (←)">&#8249;</button>
+    <select id="sceneSelect" aria-label="Scene"></select>
+    <button id="nextScene" title="Next scene (→)">&#8250;</button>
+  </div>
   <div class="seg" id="sourceSwitch" role="group" aria-label="Displayed image">
     <button id="srcPhoto"   aria-pressed="true">Photo</button>
     <button id="srcOverlay" aria-pressed="false">Overlay</button>
@@ -204,15 +237,50 @@
     window.addEventListener('unhandledrejection', function (e) {
       show('Unhandled promise rejection', (e.reason && e.reason.message) || e.reason);
     });
-    // If the module never signals that it booted, say so rather than sitting mute.
+    // If the module never signals that it booted, find out WHY rather than guessing.
+    // The usual causes are environmental, not syntactic: the server rooted at the app
+    // folder so ../engine/ escapes it, a .js served as text/plain (which a module
+    // loader refuses), or the page opened from file://.
     window.addEventListener('load', function () {
-      setTimeout(function () {
-        if (!window.__soundscapesReady && !shown) {
-          show('app.js did not load',
-               'The module failed before it could attach the Listen button. Usually a ' +
-               '404 on ../engine/soundscape-engine.js, or a syntax error. Check the ' +
-               'Network and Console tabs.');
+      setTimeout(async function () {
+        if (window.__soundscapesReady || shown) return;
+        var lines = [];
+        // The commonest cause, and it hides in plain sight: `serve` strips ".html"
+        // and then "/index", leaving the page on a path with NO TRAILING SLASH. Every
+        // relative URL then resolves one directory too high, so ./app.js becomes
+        // /src/js/app.js. serve.json in the repo root turns that off.
+        if (!/\/$|\.html$/.test(location.pathname)) {
+          lines.push('The URL is <code>' + location.pathname + '</code> — no trailing ' +
+                     'slash and no <code>.html</code>, so the server rewrote it and every ' +
+                     'relative path now resolves one folder too high. Restart the server ' +
+                     'so it picks up <code>serve.json</code> (<code>cleanUrls: false</code>), ' +
+                     'or use <code>python3 -m http.server 3000</code> from the repo root.');
         }
+        if (location.protocol === 'file:') {
+          lines.push('The page is on <code>file://</code>. ES modules and fetch need ' +
+                     'http — run <code>npm run dev</code> and open ' +
+                     '<code>localhost:3000/src/js/app/index.html</code>.');
+        }
+        for (const rel of ['./app.js', '../engine/soundscape-engine.js']) {
+          try {
+            const r = await fetch(new URL(rel, location.href).href, { cache: 'no-store' });
+            const ct = r.headers.get('content-type') || '(none)';
+            if (!r.ok) {
+              lines.push(rel + ' -> <b>HTTP ' + r.status + '</b> (resolved to ' +
+                         new URL(rel, location.href).pathname + ')');
+            } else if (!/javascript|ecmascript/i.test(ct)) {
+              lines.push(rel + ' -> served as <b>' + ct + '</b>. A module loader ' +
+                         'refuses anything that is not a JavaScript MIME type.');
+            } else {
+              lines.push(rel + ' -> ok (' + r.status + ', ' + ct + ')');
+            }
+          } catch (err) {
+            lines.push(rel + ' -> <b>unreachable</b> (' + err.message + ')');
+          }
+        }
+        lines.push('If both are ok, the module threw at load — the Console has the ' +
+                   'real error, and a hard reload (Cmd+Shift+R) rules out a stale cache.');
+        show('app.js did not load', lines.join('<br>'));
       }, 1500);
     });
   })();

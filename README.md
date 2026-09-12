@@ -63,6 +63,9 @@ python src/python/image_analysis/ingest_images.py --in resources/photos \
     --pick IMG_8753.HEIC IMG_8754.HEIC IMG_8755.HEIC IMG_8756.HEIC \
     --each --scene poi
 
+# SURVEY — what is actually in each take? Measures, guesses, writes labels.json.
+python src/python/audio_prep/survey_recordings.py --write-labels
+
 # PREPARE — our recordings in, seamless loops + one layer each out.
 # --labelled-only uses just the takes whose filename says what they are; without it
 # every recording becomes a simultaneous layer.
@@ -131,12 +134,78 @@ The viewer can show any of these in place of the photo: the **Photo / Overlay / 
 Labels** buttons in the top-left swap the displayed image while keeping the pan, which is
 how you check whether `waterfall` really landed on a waterfall.
 
+### Moving between scenes
+
+The viewer reads `data/scenes/index.json` — a browser cannot list a directory over HTTP,
+so `scene_index.py` writes it and every tool that creates a scene refreshes it. Run it by
+hand after editing scenes yourself:
+
+```bash
+python src/python/scene_index.py
+```
+
+Then `‹ ›` in the top-left, the dropdown, or the **arrow keys** move between scenes, and
+**1–4** switch the displayed image. A scene with no audio yet opens anyway, marked
+`no audio` — you can pan and inspect it long before its sound exists.
+
+Scenes open at a **75° field of view**, not fitted to the window. Fitting a 360 to the
+window shows 288° at once, which is a picture *of* a panorama rather than standing in
+one — and it flattens the audio, because nothing is ever out of view. Scroll to zoom.
+
 ### Exploring without sound
 
 The gate has a second button, **Explore without sound**. It skips audio entirely — no
 AudioContext, no downloads, no graph — but geometry, visibility, the meters and the
 compass all still run. Use it to check placement before any audio exists, or when a scene
 has no layers yet.
+
+### Knowing what you recorded
+
+Two dozen files called `R07_0021.WAV` tell you nothing.
+`survey_recordings.py` measures each take — spectral centroid, low-frequency share,
+onset rate, and what survives a 100 Hz high-pass — and says what it probably is. It
+writes `labels.json` beside the recordings, which `prepare_audio.py` reads in preference
+to guessing from filenames.
+
+The measurement that matters most: **a take with two thirds of its energy below 200 Hz
+and a centroid near 400 Hz is wind hitting the capsule, not wind in a landscape.** A
+high-pass does not rescue it — the rumble *is* the recording. Those are marked
+`usable: false` and skipped.
+
+Edit `labels.json` by hand wherever the guess is wrong and set `"auto": false`; a re-run
+leaves your version alone.
+
+Two takes of the same class are handled differently by kind. A **region** keeps only the
+longest take — four footstep loops from one direction is mud, and 6 dB too loud. An
+**event** collapses into one layer holding every take as a variant, which is what stops a
+cowbell sounding like a sample.
+
+### Wiring scenes to audio
+
+The two halves of the pipeline run past each other until this step. Segmentation knows
+**where** things are but writes placeholder filenames; `prepare_audio.py` makes **real
+audio** but guesses geometry from a filename hint table. `build_scene_layers.py` joins
+them:
+
+```
+geometry  <- scene.segmented.json   (measured from the photograph)
+audio     <- data/audio/            (our recordings first, downloads second)
+```
+
+```bash
+python src/python/audio_prep/build_scene_layers.py --dry-run   # look first
+python src/python/audio_prep/build_scene_layers.py
+```
+
+It writes the layers into each `scene.json` with the azimuths, elevations, spreads and
+distances segmentation actually measured, and reports every class that has geometry but
+no sound. A stem can stand in for a neighbouring class where that is honest — a wind bed
+is what an exposed rock face sounds like, our footsteps take is what `person` sounds like
+from two metres — and the layer records what it borrowed.
+
+Mark a layer `"locked": true` and it survives untouched; everything else is regenerated,
+so re-running after a better segmentation pass or a new batch of downloads simply
+improves the scene.
 
 ### Do we have a sound for everything we can see?
 
@@ -148,7 +217,16 @@ Compares each scene's `<image>_classes.txt` against the layers wired up in its `
 and prints the gap, biggest share of the view first, with a Freesound query for each.
 Classes that are silent by design (`sky`, `trail`) are reported as such, not as holes.
 
-Then fill the gaps. Downloads are **source material**, so they land in
+Then fill the gaps, driven by what the scenes actually contain rather than a guess:
+
+```bash
+python src/python/audio_prep/check_coverage.py --json   # -> data/audio-needs.json
+node src/js/tools/fetch-sounds.mjs                      # fetches exactly those classes
+```
+
+`check_coverage.py --json` walks every scene's class report and exports the missing
+classes with their queries, so the class taxonomy stays in one place (Python) rather than
+drifting between two. Downloads are **source material**, so they land in
 `resources/sounds-freesound/` beside our own takes — not in `data/scenes/`, which holds
 only what the pipeline generates — and they go through the same `prepare_audio.py`:
 
@@ -191,6 +269,22 @@ Two fields matter more than the rest:
 
 `GPSAltitude` comes along too, and is the input the mix wants for thinning the spectrum
 as a trail climbs.
+
+## If the page loads but nothing works
+
+`serve` rewrites URLs by default: it strips `.html`, then strips `/index`, landing the
+page on `/src/js/app` with **no trailing slash**. Every relative path then resolves one
+directory too high — `./app.js` becomes `/src/js/app.js` — so the module 404s, no click
+handler is ever attached, and the Listen button does nothing.
+
+`serve.json` in the repo root turns that off (`"cleanUrls": false`) — `serve` reads it
+automatically, and there is no CLI flag for it in this version (`--no-clean-urls` is
+rejected and the server refuses to start). If you launched the server before that file
+existed, **restart it**. Any plain static server works too:
+
+```bash
+python3 -m http.server 3000
+```
 
 ## A note on the 360 files
 
@@ -236,7 +330,9 @@ sounds like a switch; this sounds like a place.
 
 ## Licensing
 
-Our own recordings: ours. `fetch-sounds.mjs` pulls **CC0 only** by default and writes
-`CREDITS.md` for whatever it took. For production-grade filler, the Sonniss
+Our own recordings: ours. `fetch-sounds.mjs` pulls **CC0 and Attribution** by default — both are fine commercially,
+and it writes `CREDITS.md` with every file, author, licence and link, which is all
+Attribution asks for. `--cc0-only` narrows it to sounds needing no credit at all, at the
+cost of far fewer results. For production-grade filler, the Sonniss
 #GameAudioGDC bundle is free, royalty-free and commercial-use with no attribution — but
 its licence forbids using the sounds to train AI, which matters if we ever go generative.
