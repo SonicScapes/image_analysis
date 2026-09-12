@@ -608,12 +608,17 @@ def direction_to_pixel(az, el, w, h, projection, hfov, vfov):
 def write_labeled_overlay(base, regions, shares, out_dir, projection, hfov, vfov,
                           max_labels=12):
     """
-    overlay.png with the class names written on the regions themselves. This is the image
+    overlay_labeled.png: the same transparent tint as overlay.png (see write_pngs), with
+    the class names and a centroid dot written on top of each region. This is the image
     that makes the pipeline legible to someone who has never seen the code: they can look
     at one picture and check whether 'waterfall' is really on a waterfall.
+
+    `base` is the RGBA tint `write_pngs` returned — kept as RGBA here (not flattened to
+    RGB) so the text and dots land on the same mostly-transparent image, not a copy of
+    the photo.
     """
     from PIL import ImageDraw
-    img = Image.fromarray(base[..., :3] if base.ndim == 3 and base.shape[2] == 4 else base)
+    img = Image.fromarray(base, mode="RGBA") if base.shape[-1] == 4 else Image.fromarray(base).convert("RGBA")
     w, h = img.size
     draw = ImageDraw.Draw(img, "RGBA")
     size = max(14, int(w / 70))
@@ -648,40 +653,55 @@ def write_labeled_overlay(base, regions, shares, out_dir, projection, hfov, vfov
         draw.ellipse([x - rr, y - rr, x + rr, y + rr], fill=colour + (255,))
 
     dest = out_dir / "overlay_labeled.png"
-    img.save(dest)
+    img.save(dest, optimize=True)
     return dest
+
+
+TINT_ALPHA = 132         # opacity of overlay.png / overlay_labeled.png over the photo
+VOID_RGB = (10, 12, 12)  # lut[255]: outside the photographed area
 
 
 def write_pngs(labels, class_order, erp, out_dir, grid_w, grid_h, lonlat=None):
     """
-    labels.png is the sphere label map. overlay.png is the source image with the labels
-    painted over it — the one picture that shows the sound placement came from the photo.
+    labels.png is the sphere label map. overlay.png is a TRANSPARENT TINT of it, sized to
+    the photo, meant to be drawn on top of the photo in the browser — not the photo with
+    the labels blended in.
 
-    For an equirect canvas the label map can simply be stretched over the base. For a flat
-    photo it cannot: the photo is not 2:1 and its pixels are not linear in longitude. So
-    when `lonlat` is supplied we look each base pixel's own direction up in the map.
+    Baking the label colours into the photograph (as this used to do: 0.62*photo +
+    0.38*colour, saved as a lossless PNG) bakes the photo's own high-frequency detail
+    into the file too, which is exactly what a PNG compresses worst — that came to
+    20+ MB for one panorama. A flat-coloured image that is mostly transparent (opaque
+    only over classified ground) is exactly what PNG compresses BEST, and the browser
+    already has the photo to layer it over, so nothing is lost by leaving it out.
+
+    For an equirect canvas the label map can simply be stretched to the photo's size. For
+    a flat photo it cannot: the photo is not 2:1 and its pixels are not linear in
+    longitude. So when `lonlat` is supplied we look each base pixel's own direction up in
+    the map instead.
     """
     lut = np.zeros((256, 3), np.uint8)
     for i, c in enumerate(class_order):
         lut[i] = PALETTE.get(c, (128, 128, 128))
-    lut[255] = (10, 12, 12)            # void: outside the photographed area
+    lut[255] = VOID_RGB
     lab_rgb = lut[labels]
     Image.fromarray(lab_rgb).resize((grid_w * 2, grid_h * 2), Image.NEAREST) \
         .save(out_dir / "labels.png")
 
-    base = erp[..., :3] if erp.ndim == 3 and erp.shape[2] == 4 else erp
+    h, w = erp.shape[:2]
     if lonlat is None:
-        big = np.array(Image.fromarray(lab_rgb).resize(
-            (base.shape[1], base.shape[0]), Image.NEAREST), np.float32)
+        big = np.array(Image.fromarray(lab_rgb).resize((w, h), Image.NEAREST))
     else:
         lon, lat = lonlat
         GH, GW = labels.shape
         gx = np.clip(((lon / (2 * math.pi) + 0.5) * GW).astype(int), 0, GW - 1)
         gy = np.clip(((0.5 - lat / math.pi) * GH).astype(int), 0, GH - 1)
-        big = lab_rgb[gy, gx].astype(np.float32)
-    blend = (0.62 * base.astype(np.float32) + 0.38 * big).astype(np.uint8)
-    Image.fromarray(blend).save(out_dir / "overlay.png")
-    return blend
+        big = lab_rgb[gy, gx]
+
+    void = np.all(big == VOID_RGB, axis=-1)
+    alpha = np.where(void, 0, TINT_ALPHA).astype(np.uint8)
+    tint = np.dstack([big, alpha])
+    Image.fromarray(tint, mode="RGBA").save(out_dir / "overlay.png", optimize=True)
+    return tint
 
 
 # ---------------------------------------------------------------------------

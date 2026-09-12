@@ -441,10 +441,17 @@ function showWhere() {
 
 /* ------------------------------------------------- displayed image switcher */
 
+/*
+ * overlay.png and overlay_labeled.png are transparent tints — mostly empty alpha, opaque
+ * only over classified ground — not full copies of the photo. That is what keeps them
+ * small (a flat-coloured, mostly-transparent PNG compresses to a fraction of a percent
+ * of a photographic one). So showing them means drawing the photo, then the tint on top,
+ * not swapping the photo out for the tint. `composite: true` marks the two that need that.
+ */
 const SOURCES = {
   srcPhoto:   { file: () => pano.file, label: 'the photograph' },
-  srcOverlay: { file: () => 'overlay.png', label: 'segmentation painted over the photo' },
-  srcNamed:   { file: () => 'overlay_labeled.png', label: 'overlay with class names' },
+  srcOverlay: { file: () => 'overlay.png', label: 'segmentation painted over the photo', composite: true },
+  srcNamed:   { file: () => 'overlay_labeled.png', label: 'overlay with class names', composite: true },
   srcLabels:  { file: () => 'labels.png', label: 'the raw sphere label map' },
 };
 let currentSource = 'srcPhoto';
@@ -492,7 +499,12 @@ function geometryFor(id) {
 async function setSource(id) {
   if ($(id).disabled || id === currentSource) return;
   try {
-    await loadImage(sceneBase + SOURCES[id].file(), id);
+    const spec = SOURCES[id];
+    if (spec.composite) {
+      await loadComposite(sceneBase + pano.file, sceneBase + spec.file(), id);
+    } else {
+      await loadImage(sceneBase + spec.file(), id);
+    }
   } catch (err) {
     fail(`Could not load ${SOURCES[id].file()} — ${err.message}`);
     return;
@@ -503,6 +515,39 @@ async function setSource(id) {
   note.hidden = !geom.sphere;
   if (geom.sphere) note.textContent = 'full sphere — wider than this photograph';
   clampView();
+}
+
+/** Draw the photo, then a transparent tint on top, and hand the result to the renderer
+ * as one image — the tint alone would just be a mostly-black sparse patchwork. */
+function loadComposite(baseUrl, tintUrl, sourceId) {
+  return new Promise((resolve, reject) => {
+    const base = new Image();
+    base.onload = () => {
+      const tint = new Image();
+      tint.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = base.naturalWidth;
+        c.height = base.naturalHeight;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(base, 0, 0, c.width, c.height);
+        ctx.drawImage(tint, 0, 0, c.width, c.height);
+        const merged = new Image();
+        merged.onload = () => {
+          img = { w: merged.naturalWidth, h: merged.naturalHeight };
+          geom = geometryFor(sourceId);
+          renderer.setImage(merged, geom);
+          renderer.render({ yaw: view.yaw, pitch: view.pitch, fovH: view.fovH, fovV: fovV() });
+          resolve();
+        };
+        merged.onerror = () => reject(new Error('could not composite the tint'));
+        merged.src = c.toDataURL('image/png');
+      };
+      tint.onerror = () => reject(new Error(`could not load ${tintUrl}`));
+      tint.src = tintUrl;
+    };
+    base.onerror = () => reject(new Error(`could not load ${baseUrl}`));
+    base.src = baseUrl;
+  });
 }
 
 for (const id of Object.keys(SOURCES)) {

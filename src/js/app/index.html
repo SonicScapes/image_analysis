@@ -2,6 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<script>
+  // Pretty per-scene URLs (/scene/<id>, serve.json rewrites those to this file) put the
+  // document on a path this file doesn't actually live at, so every relative URL below —
+  // the fonts, ./app.js, ./sphere.js — would resolve one or more folders too deep. Pin
+  // the base back to where this file really is. Must run before anything relative loads,
+  // which is why it is the very first thing in <head>.
+  (function () {
+    var m = location.pathname.match(/^(.*)\/scene\/[^/]+\/?$/);
+    if (!m) return;
+    var dir = m[1].replace(/\/index\.html$/, '');   // ".../index.html/scene/x" form too
+    var b = document.createElement('base');
+    b.href = dir + '/';
+    document.head.appendChild(b);
+  })();
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SoundScapes — Experience Sound &amp; Nature</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -254,7 +269,7 @@
         // and then "/index", leaving the page on a path with NO TRAILING SLASH. Every
         // relative URL then resolves one directory too high, so ./app.js becomes
         // /src/js/app.js. serve.json in the repo root turns that off.
-        if (!/\/$|\.html$/.test(location.pathname)) {
+        if (!/\/$|\.html$|\/scene\/[^/]+\/?$/.test(location.pathname)) {
           lines.push('The URL is <code>' + location.pathname + '</code> — no trailing ' +
                      'slash and no <code>.html</code>, so the server rewrote it and every ' +
                      'relative path now resolves one folder too high. Restart the server ' +
@@ -268,11 +283,11 @@
         }
         for (const rel of ['./app.js', './sphere.js', '../engine/soundscape-engine.js']) {
           try {
-            const r = await fetch(new URL(rel, location.href).href, { cache: 'no-store' });
+            const r = await fetch(new URL(rel, document.baseURI).href, { cache: 'no-store' });
             const ct = r.headers.get('content-type') || '(none)';
             if (!r.ok) {
               lines.push(rel + ' -> <b>HTTP ' + r.status + '</b> (resolved to ' +
-                         new URL(rel, location.href).pathname + ')');
+                         new URL(rel, document.baseURI).pathname + ')');
             } else if (!/javascript|ecmascript/i.test(ct)) {
               lines.push(rel + ' -> served as <b>' + ct + '</b>. A module loader ' +
                          'refuses anything that is not a JavaScript MIME type.');

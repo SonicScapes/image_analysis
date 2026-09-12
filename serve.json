@@ -1,4 +1,8 @@
 {
   "cleanUrls": false,
-  "directoryListing": true
+  "directoryListing": true,
+  "rewrites": [
+    { "source": "/src/js/app/scene/:id", "destination": "/src/js/app/index.html" },
+    { "source": "/src/js/app/index.html/scene/:id", "destination": "/src/js/app/index.html" }
+  ]
 }
