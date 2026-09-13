@@ -27,7 +27,7 @@ lake, grass, field, path, earth, house, animal for free. It has no snow, glacier
 cattle or cable car. Pass --open-vocab to add those with CLIPSeg text prompts.
 """
 
-import argparse, json, math, sys
+import argparse, json, math, re, sys
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +55,17 @@ ALPINE_CLASSES = {
 }
 
 # Classes CLIPSeg adds by text prompt, because ADE20K has no label for them.
+#
+# "water" here is deliberately NOT a new class: it's the same key as the ADE-derived
+# bucket in ALPINE_CLASSES above, so its score reinforces "water" instead of competing
+# with it (same trick already used for "scree" and "person" -- see the class_order /
+# probs merge logic in main()). It's the cheap, targeted fix for alpine lakes: ADE20K
+# does have a `lake` index (129, already mapped into "water"), so this isn't filling a
+# gap in the label set the way snow/glacier/cattle are -- it's compensating for the main
+# model under-calling it on a flat, often mirror-still or ice-grey lake surface, which is
+# a real failure mode independent of which ADE model (SegFormer or Mask2Former) is doing
+# the main pass. Needs --open-vocab; doesn't need Mask2Former or a resegmentation of
+# everything to try -- CLIPSeg is a separate, much smaller/faster pass than either.
 OPEN_VOCAB_PROMPTS = {
     "snow":     "a snowfield on a mountain",
     "glacier":  "a glacier of blue ice",
@@ -62,6 +73,7 @@ OPEN_VOCAB_PROMPTS = {
     "cattle":   "cows grazing on an alpine pasture",
     "cablecar": "a cable car line or ski lift pylon",
     "person":   "people hiking, walkers with backpacks",
+    "water":    "a calm alpine lake or mountain tarn reflecting the sky",
 }
 
 # Sound design intent per class: base level in dB, focus bonus, default spread cap,
@@ -257,6 +269,27 @@ def load_ade_model(model_id, device):
     return proc, model
 
 
+def load_segmentation_model(model_id, device):
+    """
+    Dispatch on model architecture. SegFormer is per-pixel classification (one softmax
+    over 150 classes at every location), so `ade_probs` can read its logits directly.
+    Mask2Former is mask-classification instead: a fixed set of query masks, each with its
+    OWN class distribution, no per-pixel logits at all. Loading a Mask2Former checkpoint
+    through SegformerForSemanticSegmentation.from_pretrained() does not degrade gracefully
+    -- it raises immediately, which is why swapping in --model
+    facebook/mask2former-swin-large-ade-semantic never actually worked before. Route each
+    architecture to its own loader and its own probs function instead.
+    """
+    if "mask2former" in model_id.lower():
+        from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation
+        proc = image_processor(AutoImageProcessor, model_id)
+        model = Mask2FormerForUniversalSegmentation.from_pretrained(
+            model_id).to(device).eval()
+        return proc, model, mask2former_probs
+    proc, model = load_ade_model(model_id, device)
+    return proc, model, ade_probs
+
+
 def ade_probs(proc, model, device, crop, class_order):
     """
     Run the ADE20K model and collapse its 150 channels onto our ~10 alpine classes.
@@ -282,6 +315,46 @@ def ade_probs(proc, model, device, crop, class_order):
         for n, name in enumerate(class_order):
             for idx in ALPINE_CLASSES.get(name, []):
                 small[0, n] += p[0, idx - 1]             # objectInfo150.csv is 1-based
+
+        out = F.interpolate(small, size=crop.shape[:2], mode="bilinear",
+                            align_corners=False)
+        return out[0].float().cpu().numpy()
+
+
+def mask2former_probs(proc, model, device, crop, class_order):
+    """
+    Run Mask2Former and collapse its ADE label space onto our alpine classes, the same way
+    ade_probs does for SegFormer -- but Mask2Former has no per-pixel logits to begin with.
+    It predicts a fixed number of query masks (num_queries, ~100-200), each carrying its
+    own softmax over the 150 ADE classes plus "no object". Turning that into a per-pixel,
+    per-class probability map is exactly the first half of what transformers' own
+    post_process_semantic_segmentation does internally (softmax the class logits, sigmoid
+    the mask logits, einsum them together) -- we stop one step short of its final argmax so
+    the full per-class map can be collapsed and accumulated onto the sphere exactly like
+    the SegFormer path.
+
+    Same memory discipline as ade_probs: the einsum and the 150->K collapse happen at the
+    model's own small mask resolution, and only the ~K channels we keep get interpolated up
+    to the crop size.
+    """
+    import torch
+    import torch.nn.functional as F
+    with torch.inference_mode():
+        inputs = proc(images=Image.fromarray(crop), return_tensors="pt").to(device)
+        outputs = model(**inputs)
+        class_logits = outputs.class_queries_logits           # 1 x Q x (150 + "no object")
+        mask_logits = outputs.masks_queries_logits             # 1 x Q x h' x w' (small)
+
+        class_probs = class_logits.softmax(-1)[..., :-1]       # drop "no object"
+        mask_probs = mask_logits.sigmoid()
+        per_class = torch.einsum("bqc,bqhw->bchw", class_probs, mask_probs)  # 1x150xh'xw'
+
+        K = len(class_order)
+        small = torch.zeros((1, K) + tuple(per_class.shape[2:]), device=per_class.device,
+                            dtype=per_class.dtype)
+        for n, name in enumerate(class_order):
+            for idx in ALPINE_CLASSES.get(name, []):
+                small[0, n] += per_class[0, idx - 1]           # objectInfo150.csv is 1-based
 
         out = F.interpolate(small, size=crop.shape[:2], mode="bilinear",
                             align_corners=False)
@@ -553,7 +626,7 @@ def sky_sanity(cells, gh, gw, names, hfov):
     return (f"only {share:.0f}% of the sky is labelled 'sky' — mostly "
             + ", ".join(f"{n} {v:.0f}%" for n, v in top)
             + ".\n  A full 360 is about half sky. This segmentation is wrong. Re-run with"
-              "\n  --mode multiview and a larger model (the B4 default), not the smoke-test"
+              "\n  --mode multiview and Mask2Former-Swin-L (the default), not smoke-test"
               "\n  settings: a small model on a raw equirect reads cloud as rock or water.")
 
 
@@ -605,27 +678,37 @@ def direction_to_pixel(az, el, w, h, projection, hfov, vfov):
     return w / 2 + f * (X / Z), h / 2 - f * (Y / Z)
 
 
-def write_labeled_overlay(base, regions, shares, out_dir, projection, hfov, vfov,
-                          max_labels=12):
+def draw_region_labels(img, regions, shares, projection, hfov, vfov, max_labels=12,
+                       size_px=None):
     """
-    overlay_labeled.png: the same transparent tint as overlay.png (see write_pngs), with
-    the class names and a centroid dot written on top of each region. This is the image
-    that makes the pipeline legible to someone who has never seen the code: they can look
-    at one picture and check whether 'waterfall' is really on a waterfall.
+    Draw the class-name / coverage% / distance callout for each region onto `img` (an
+    RGBA PIL Image, modified in place and returned) at its projected (az, el) position.
 
-    `base` is the RGBA tint `write_pngs` returned — kept as RGBA here (not flattened to
-    RGB) so the text and dots land on the same mostly-transparent image, not a copy of
-    the photo.
+    Shared by write_labeled_overlay() below (the pitch asset: labels baked onto the
+    photo's segmentation tint) and by regen_overlays.py (which rebuilds both that and a
+    labels-only transparent version straight from scene.segmented.json, no model involved)
+    — sizing and layout only ever need to change in one place.
+
+    `regions` may be either the full in-process region dicts (which carry a `class` key)
+    or the reduced layer dicts persisted into scene.segmented.json (which don't -- the
+    class name there is recovered from the `id`, e.g. "forest-2" -> "forest").
+
+    `size_px` overrides the automatic width-relative sizing, for callers that want a fixed
+    size regardless of the source photo's resolution.
     """
     from PIL import ImageDraw
-    img = Image.fromarray(base, mode="RGBA") if base.shape[-1] == 4 else Image.fromarray(base).convert("RGBA")
     w, h = img.size
     draw = ImageDraw.Draw(img, "RGBA")
-    size = max(14, int(w / 70))
+    # 65% of the 13 Sep sizing (max(10, w/130)) -- still too big/clumsy at that size per
+    # Tom, so floor and width-divisor are both scaled by the same 0.65. Padding, corner
+    # radius, outline width and the centroid dot below are all defined as fractions of
+    # `size`, so they shrink proportionally for free.
+    size = size_px or max(7, int(w / 200))
     font = _load_font(size)
-    pct = dict(shares)
+    pct = shares if isinstance(shares, dict) else dict(shares)
 
-    for r in sorted(regions, key=lambda r: -r["solid_angle_sr"])[:max_labels]:
+    for r in sorted(regions, key=lambda r: -r.get("solid_angle_sr", 0))[:max_labels]:
+        cls = r.get("class") or re.sub(r"-\d+$", "", r["id"])
         pos = direction_to_pixel(r["az"], r["el"], w, h, projection, hfov, vfov)
         if pos is None:
             continue
@@ -635,26 +718,54 @@ def write_labeled_overlay(base, regions, shares, out_dir, projection, hfov, vfov
         x = min(max(x, size), w - size)
         y = min(max(y, size), h - size)
 
-        colour = PALETTE.get(r["class"], (200, 200, 200))
-        share = pct.get(r["class"])
+        colour = PALETTE.get(cls, (200, 200, 200))
+        share = pct.get(cls)
         text = r["id"] if share is None else f"{r['id']}  {share}%"
         text += f"\n{r['distance']} m"
 
-        box = draw.multiline_textbbox((x, y), text, font=font, anchor="mm", spacing=2)
-        pad = size * 0.35
+        box = draw.multiline_textbbox((x, y), text, font=font, anchor="mm", spacing=1)
+        pad = size * 0.28
+        # Fill alpha dropped 205 -> 120 (~47% opacity, was ~80%) so the photo reads
+        # through the box instead of the box reading as an opaque plate on the image.
         draw.rounded_rectangle(
             [box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad],
-            radius=size * 0.3, fill=(8, 12, 11, 205), outline=colour + (255,),
-            width=max(2, size // 12))
+            radius=size * 0.26, fill=(8, 12, 11, 120), outline=colour + (255,),
+            width=max(1, size // 14))
         draw.multiline_text((x, y), text, font=font, fill=(240, 246, 242, 255),
-                            anchor="mm", align="center", spacing=2)
+                            anchor="mm", align="center", spacing=1)
         # A dot marks the exact centroid, since the label is nudged to stay on canvas.
-        rr = max(3, size // 6)
+        rr = max(2, size // 8)
         draw.ellipse([x - rr, y - rr, x + rr, y + rr], fill=colour + (255,))
+    return img
+
+
+def write_labeled_overlay(base, regions, shares, out_dir, projection, hfov, vfov,
+                          max_labels=12):
+    """
+    Two outputs, same labels, different backgrounds:
+
+    - overlay_labeled.png: the labels baked onto the same transparent tint as overlay.png
+      (see write_pngs). The pitch asset — one picture that makes the pipeline legible to
+      someone who has never seen the code, proving 'waterfall' really is on a waterfall.
+    - overlay_labels.png: the SAME labels, on a fully transparent background with no tint
+      at all. This is what the viewer's "Labels" toggle actually loads, so switching
+      labels on/off no longer means the browser has to reverse-engineer which pixels are
+      "label" by diffing two baked-together images.
+
+    `base` is the RGBA tint `write_pngs` returned — kept as RGBA here (not flattened to
+    RGB) so the text and dots land on the same mostly-transparent image, not a copy of
+    the photo.
+    """
+    img = Image.fromarray(base, mode="RGBA") if base.shape[-1] == 4 else Image.fromarray(base).convert("RGBA")
+    labels_only = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw_region_labels(img, regions, shares, projection, hfov, vfov, max_labels)
+    draw_region_labels(labels_only, regions, shares, projection, hfov, vfov, max_labels)
 
     dest = out_dir / "overlay_labeled.png"
     img.save(dest, optimize=True)
-    return dest
+    labels_dest = out_dir / "overlay_labels.png"
+    labels_only.save(labels_dest, optimize=True)
+    return dest, labels_dest
 
 
 TINT_ALPHA = 132         # opacity of overlay.png / overlay_labeled.png over the photo
@@ -710,9 +821,12 @@ def main():
     ap.add_argument("panorama")
     ap.add_argument("--out", default="out")
     ap.add_argument("--mode", default="multiview", choices=["multiview", "cube", "erp"])
-    ap.add_argument("--model", default="nvidia/segformer-b4-finetuned-ade-512-512",
-                    help="swap for facebook/mask2former-swin-large-ade-semantic for "
-                         "better masks and ~4x the time")
+    ap.add_argument("--model", default="facebook/mask2former-swin-large-ade-semantic",
+                    help="ADE-trained model to segment with. Defaults to the quality "
+                         "option (Mask2Former-Swin-L, ~4x slower than SegFormer) because "
+                         "this runs once per PoI, offline -- speed doesn't matter (see "
+                         "segmentation-approach.md). Pass "
+                         "nvidia/segformer-b4-finetuned-ade-512-512 for a fast smoke test.")
     ap.add_argument("--open-vocab", action="store_true",
                     help="add snow / glacier / scree / cattle / cable car via CLIPSeg")
     ap.add_argument("--grid", type=int, default=64,
@@ -796,7 +910,7 @@ def main():
     weight = np.zeros((GH, GW), np.float32)
     vacc = np.zeros((GH, GW), np.float32)
 
-    proc, model = load_ade_model(args.model, device)
+    proc, model, probs_fn = load_segmentation_model(args.model, device)
     n_ade = len(ALPINE_CLASSES)
 
     # Say what this will cost before allocating it. K channels x analysis area x 4 bytes,
@@ -830,11 +944,25 @@ def main():
               f"{valid.mean()*100:3.0f}% image …", flush=True)
 
         probs = np.zeros((len(class_order),) + rgb.shape[:2], np.float32)
-        probs[:n_ade] = ade_probs(proc, model, device, rgb, class_order[:n_ade])
+        probs[:n_ade] = probs_fn(proc, model, device, rgb, class_order[:n_ade])
         if args.open_vocab:
             extra = clipseg_probs(rgb, OPEN_VOCAB_PROMPTS, device)
+            # CLIPSeg's sigmoid score for one prompt is an independent confidence, not a
+            # class competing fairly in the same distribution as the ADE softmax (which
+            # already sums to <=1 across our classes at every pixel). Added in raw, as this
+            # used to do, a mediocre-but-unbounded CLIPSeg score -- and CLIPSeg is
+            # genuinely bad at telling a pale, sunlit hut wall or a bright scree slope from
+            # "a snowfield on a mountain" -- can outvote a real, better-calibrated ADE
+            # prediction for "built" or "scree" at the very same pixel. That is what was
+            # putting snow on the mountain hut and between the scree.
+            # Fix: CLIPSeg only gets to claim the probability mass ADE hasn't already
+            # committed elsewhere. Scale each prompt's score by the pixel's unclaimed
+            # headroom (1 - the strongest ADE class there). Where ADE is confident (a clear
+            # roofline, a clear rock face) CLIPSeg is squeezed out; where ADE is genuinely
+            # unsure (a texture it has no label for at all, like snow) CLIPSeg decides.
+            headroom = np.clip(1.0 - probs[:n_ade].max(0), 0.0, 1.0)
             for i, name in enumerate(OPEN_VOCAB_PROMPTS):
-                probs[class_order.index(name)] += extra[i]
+                probs[class_order.index(name)] += extra[i] * headroom
         probs *= valid[None]
         scatter_to_sphere(acc, weight, vacc, probs, valid, lon, lat)
         del probs, rgb, crop
@@ -898,6 +1026,8 @@ def main():
                      "hfov_deg": round(float(hfov), 1), "vfov_deg": round(float(vfov), 1),
                      "wrap": projection == "equirect" and hfov > 350},
         "source": {"mode": args.mode, "model": args.model,
+                   "arch": "mask2former" if "mask2former" in args.model.lower()
+                           else "segformer",
                    "open_vocab": args.open_vocab},
         "scene": {
             # Rough stand-ins. Replace with your scenicness regressor when you have one.
@@ -943,10 +1073,10 @@ def main():
     if any(human.values()):
         print(f"\nvisibly human: " + ", ".join(f"{k} {v}%" for k, v in human.items() if v)
               + f" -> starting pressure {manifest['scene']['pressure']}")
-    labeled = write_labeled_overlay(blended, regions, rows, out_dir,
-                                    projection, hfov, vfov)
+    labeled, labels_only = write_labeled_overlay(blended, regions, rows, out_dir,
+                                                 projection, hfov, vfov)
     print(f"\nwrote {out_dir}/scene.segmented.json, {classes_path.name},")
-    print(f"      labels.png, overlay.png, {labeled.name}")
+    print(f"      labels.png, overlay.png, {labeled.name}, {labels_only.name}")
     print("Next: fill the `src` files (fetch-sounds.mjs uses the `query` fields),")
     print("then load scene.segmented.json in demo.html.")
 

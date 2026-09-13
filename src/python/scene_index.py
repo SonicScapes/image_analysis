@@ -40,6 +40,10 @@ def write_index(scenes_dir=DEFAULT_SCENES, quiet=True):
             # Which debug images the viewer can offer for this scene.
             "overlay": (d / "overlay.png").exists(),
             "overlay_labeled": (d / "overlay_labeled.png").exists(),
+            # Transparent-background labels the viewer's "Labels" toggle actually loads
+            # (added 13 Sep 2026 — overlay_labeled.png is now only the combined pitch
+            # asset). Run regen_overlays.py to backfill this for older scenes.
+            "overlay_labels": (d / "overlay_labels.png").exists(),
             "labels": (d / "labels.png").exists(),
             "elev_m": pano.get("elev_m"),
             "lat": pano.get("lat"),

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-regen_overlays.py — rebuild overlay.png and overlay_labeled.png as small RGBA tints.
+regen_overlays.py — rebuild overlay.png, overlay_labeled.png and overlay_labels.png.
 
 The problem: the original overlay.png blended the label colours INTO the photograph
 (0.62 * photo + 0.38 * colour) and saved that as a lossless PNG. That bakes a full copy
@@ -21,22 +21,33 @@ photo's own per-pixel direction (via its own projection/hfov/vfov) tells us wher
 sample it. That is the same sampling `direction_to_pixel` uses for the text labels, just
 run per-pixel instead of per-region, and it costs a resize and a lookup, not a model.
 
+overlay_labels.png (added 13 Sep 2026) is the same label callouts as overlay_labeled.png,
+but on a fully transparent background instead of baked onto the tint. It's what the
+viewer's "Labels" toggle actually loads now, so re-run this after pulling the label
+size/layout fix even if you don't need smaller overlay.png files — it's the only place
+that file gets (re)generated for scenes that already have a scene.segmented.json.
+
     python regen_overlays.py                       # every scene, in place
     python regen_overlays.py --scene poi-1 --keep   # one scene, old files kept as .bak
 """
 
-import argparse, json, math, re, sys
+import argparse, json, math, sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from segment_panorama import (flat_view, direction_to_pixel, _load_font, PALETTE,
-                               TINT_ALPHA, VOID_RGB)
+from segment_panorama import (flat_view, direction_to_pixel, draw_region_labels,
+                               PALETTE, TINT_ALPHA, VOID_RGB)
 
-REPO = Path(__file__).resolve().parents[3]
-DEFAULT_SCENES = REPO / "data" / "scenes"
+# NOT REPO / "data" / "scenes": that was right back when image_analysis and 360viewer_app
+# were separate sibling repos each with their own data/. Since the consolidation, scenes
+# live under 360viewer_app/data/scenes (paths.py is the one place that's supposed to know
+# this) -- this file kept computing its own, now-stale default and would FileNotFoundError
+# on a bare `python regen_overlays.py`. Reuse paths.py instead of drifting from it again.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))     # src/python, for paths.py
+from paths import SCENES_DIR as DEFAULT_SCENES
 
 VOID = np.array(VOID_RGB, np.uint8)
 ALPHA = TINT_ALPHA                           # same opacity segment_panorama.py now uses
@@ -72,45 +83,6 @@ def tint_from_labels(labels_png, w, h, projection, hfov, vfov):
     return np.dstack([rgb, alpha])
 
 
-def draw_labels(tint_rgba, regions, shares, projection, hfov, vfov):
-    """The same text + centroid dots the original overlay_labeled.png carried, on a
-    transparent canvas instead of a photo-blended one."""
-    from PIL import ImageDraw
-    img = Image.fromarray(tint_rgba, mode="RGBA")
-    w, h = img.size
-    draw = ImageDraw.Draw(img, "RGBA")
-    size = max(14, int(w / 70))
-    font = _load_font(size)
-
-    for r in sorted(regions, key=lambda r: -r.get("solid_angle_sr", 0))[:MAX_LABELS]:
-        cls = re.sub(r"-\d+$", "", r["id"])
-        pos = direction_to_pixel(r["az"], r["el"], w, h, projection, hfov, vfov)
-        if pos is None:
-            continue
-        x, y = pos
-        if not (-w < x < 2 * w and 0 <= y <= h):
-            continue
-        x = min(max(x, size), w - size)
-        y = min(max(y, size), h - size)
-
-        colour = PALETTE.get(cls, (200, 200, 200))
-        share = shares.get(cls)
-        text = r["id"] if share is None else f"{r['id']}  {share}%"
-        text += f"\n{r['distance']} m"
-
-        box = draw.multiline_textbbox((x, y), text, font=font, anchor="mm", spacing=2)
-        pad = size * 0.35
-        draw.rounded_rectangle(
-            [box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad],
-            radius=size * 0.3, fill=(8, 12, 11, 205), outline=colour + (255,),
-            width=max(2, size // 12))
-        draw.multiline_text((x, y), text, font=font, fill=(240, 246, 242, 255),
-                            anchor="mm", align="center", spacing=2)
-        rr = max(3, size // 6)
-        draw.ellipse([x - rr, y - rr, x + rr, y + rr], fill=colour + (255,))
-    return img
-
-
 def regen_one(scene_dir, keep=False):
     scene_file = scene_dir / "scene.json"
     seg_file = scene_dir / "scene.segmented.json"
@@ -130,6 +102,7 @@ def regen_one(scene_dir, keep=False):
 
     labels_png = Image.open(labels_file)
     tint = tint_from_labels(labels_png, w, h, projection, hfov, vfov)
+    layers, shares = seg.get("layers", []), seg.get("classes", {})
 
     before = []
     after = []
@@ -147,10 +120,20 @@ def regen_one(scene_dir, keep=False):
         before.append(old.stat().st_size)
         if keep:
             old.rename(scene_dir / "overlay_labeled.png.bak")
-    labeled = draw_labels(tint, seg.get("layers", []), seg.get("classes", {}),
-                          projection, hfov, vfov)
+    labeled = draw_region_labels(Image.fromarray(tint, mode="RGBA"), layers, shares,
+                                 projection, hfov, vfov, max_labels=MAX_LABELS)
     labeled.save(scene_dir / "overlay_labeled.png", optimize=True)
     after.append((scene_dir / "overlay_labeled.png").stat().st_size)
+
+    old = scene_dir / "overlay_labels.png"
+    if old.exists():
+        before.append(old.stat().st_size)
+        if keep:
+            old.rename(scene_dir / "overlay_labels.png.bak")
+    labels_only = draw_region_labels(Image.new("RGBA", (w, h), (0, 0, 0, 0)), layers,
+                                     shares, projection, hfov, vfov, max_labels=MAX_LABELS)
+    labels_only.save(scene_dir / "overlay_labels.png", optimize=True)
+    after.append((scene_dir / "overlay_labels.png").stat().st_size)
 
     b = sum(before) / 1e6 if before else 0
     a = sum(after) / 1e6

@@ -47,6 +47,17 @@ STEM_ALIASES = {
     "waterfall": ["waterfall", "water"],
 }
 
+# For most of the classes above, the FIRST alias present in the pool wins — a wind bed
+# only stands in for rock/snow when there is nothing dedicated, so mixing it in
+# alongside a real rock recording would just make the layer muddier. `person` is
+# different: our dedicated "_persons" takes and our older "_footsteps" takes are each a
+# legitimate, different way to hear someone nearby, not a fallback chain. Pooling every
+# alias that exists as variants of ONE event layer is what makes a person-event sound
+# different scene to scene — sometimes the footsteps take, sometimes the persons take —
+# using the same random-variant scheduling prepare_audio.py already gives an event with
+# several `src` entries, rather than always picking the same one deterministically.
+MERGE_CLASSES = {"person"}
+
 
 def pool_index(audio_dir):
     """class -> [relative filenames], newest naming first (water.mp3 before water-2.mp3)."""
@@ -58,10 +69,36 @@ def pool_index(audio_dir):
 
 
 def stems_for(cls, pool):
-    for candidate in STEM_ALIASES.get(cls, [cls]):
+    aliases = STEM_ALIASES.get(cls, [cls])
+    if cls in MERGE_CLASSES:
+        files, used = [], []
+        for candidate in aliases:
+            if candidate in pool:
+                files += pool[candidate]
+                used.append(candidate)
+        if not files:
+            return None, []
+        label = cls if used == [cls] else "+".join(used)
+        return label, files
+    for candidate in aliases:
         if candidate in pool:
             return candidate, pool[candidate]
     return None, []
+
+
+# Sounds that don't belong to any detected REGION at all — an aircraft passing overhead
+# isn't confined to the patch of sky the segmenter outlined, it's just occasionally
+# audible whenever there IS sky in the shot (which is nearly every scene). SOUND_SPEC in
+# segment_panorama.py marks "sky" silent-by-design, so it is deliberately absent from
+# seg["layers"] — these are wired instead off the class's raw share in `classes`, with a
+# fixed geometry rather than a measured one, and only when the pool actually has audio
+# for them (prepare_audio.py only produces an "airplane" stem once a "_airplane"-labelled
+# recording exists in resources/recordings).
+GLOBAL_EXTRAS = {
+    # triggering class (from `classes`) -> (pool stem, layer geometry)
+    "sky": ("airplane", dict(az=0, el=55, spread=180, distance=1800, gain=-10, focus=4,
+                              ratePerMin=0.4, jitter=0.9)),
+}
 
 
 def main():
@@ -122,6 +159,24 @@ def main():
             }
             if stem_cls != cls:
                 layer["borrowed_from"] = stem_cls
+            built.append(layer)
+
+        # Sounds keyed off a raw class share rather than a detected region — see
+        # GLOBAL_EXTRAS above.
+        for trigger_cls, (stem_cls, geom) in GLOBAL_EXTRAS.items():
+            if shares.get(trigger_cls, 0) < args.min_share:
+                continue
+            if stem_cls in locked or any(l["id"] == stem_cls for l in built):
+                continue
+            files = pool.get(stem_cls, [])
+            if not files:
+                continue
+            layer = {
+                "id": stem_cls, "class": stem_cls, "type": "event",
+                "src": ([f"../../audio/{f}" for f in files] if len(files) > 1
+                        else f"../../audio/{files[0]}"),
+                **geom,
+            }
             built.append(layer)
 
         # Anything the user locked survives untouched, and wins on id collisions.

@@ -89,7 +89,54 @@ ADE20K has **no** snow, glacier, scree-as-such, cattle or cable car. `--open-voc
 those with CLIPSeg text prompts, summed onto the same accumulator as an ensemble. SAM 3
 concept prompts would give better masks for the same job if there is time to wire it up.
 
-Models: SegFormer-B4 ADE for speed, Mask2Former-Swin-L ADE for quality (~4× slower).
+`--open-vocab` also carries a `water` prompt ("a calm alpine lake or mountain tarn
+reflecting the sky") that reinforces the *existing* ADE `water` bucket rather than adding
+a new class — a targeted, cheap fix (13 Sep) for lakes reading as under-detected: ADE
+already has a `lake` index (129, already mapped), the problem was the main model
+under-calling it on a flat, often mirror-still or ice-grey surface. Independent of the
+main model choice and much faster than the 20-view multiview pass, so it's worth trying
+on its own (`--mode erp --open-vocab` on one image is a one-pass sanity check) before
+committing to a full Mask2Former resegmentation of everything.
+
+Models: SegFormer-B4 ADE for speed, Mask2Former-Swin-L ADE for quality (~4× slower). Default
+is now Mask2Former-Swin-L (13 Sep fix, see below) — pass `--model
+nvidia/segformer-b4-finetuned-ade-512-512` for a fast smoke test.
+
+### Fixed 13 Sep 2026: the quality model, and CLIPSeg outvoting ADE
+
+Two real bugs, found chasing misclassified waterfalls-in-sky, missing lakes, grass read as
+forest, and snow painted onto the mountain hut and between scree:
+
+1. **`--model facebook/mask2former-swin-large-ade-semantic` never actually worked.** The
+   flag's own help text advertised it, but `load_ade_model()` hardcoded
+   `SegformerForSemanticSegmentation.from_pretrained()`, which raises on a Mask2Former
+   checkpoint (mask-classification, not per-pixel classification — no per-pixel logits to
+   read). Every run was silently on SegFormer-B4, the fast/smoke-test model, regardless of
+   `--model`. `load_segmentation_model()` now dispatches to a real Mask2Former loader and
+   probs function (`mask2former_probs`, built from `class_queries_logits` +
+   `masks_queries_logits`, the same math `post_process_semantic_segmentation` does
+   internally, stopped one step before its argmax). **`--model` now defaults to
+   Mask2Former-Swin-L** — this step runs once per PoI offline, so per the note above,
+   speed shouldn't have been the default's priority in the first place.
+2. **CLIPSeg's open-vocab scores were added into the argmax unnormalized.** ADE's per-class
+   values come from a softmax (sum ≤ 1 across our classes at a pixel); CLIPSeg's per-prompt
+   sigmoid scores are independent confidences with no such constraint. Summed in raw, a
+   mediocre-but-unbounded CLIPSeg "a snowfield on a mountain" score (CLIPSeg is genuinely
+   poor at separating that from a pale, sunlit hut wall or bright scree) could outvote a
+   correct, confident ADE "built" or "scree" prediction at the same pixel — which is
+   exactly the hut/scree/snow bug reported. Fix: each CLIPSeg score is now scaled by the
+   pixel's unclaimed headroom, `1 - max(ADE prob at that pixel)`, before being added. Where
+   ADE is confident, CLIPSeg is squeezed out; where ADE has no label for what it's seeing
+   (snow, glacier), CLIPSeg still gets to decide.
+
+Grass-as-forest and undetected lakes were **not** mapping bugs — `pasture` (grass/field/
+flower) and `forest` (tree/plant/palm) were already separate buckets, and `water` already
+includes ADE's `lake` index (129). Both are consistent with plain SegFormer-B4 accuracy
+limits at close range / on reflective surfaces, so re-run affected panoramas under the new
+Mask2Former default before changing more code. The waterfall-in-sky report has no
+identified code or index cause either (indices verified against `objectInfo150.csv`,
+sphere-scatter geometry checked) — likely the same story, but if it persists under
+Mask2Former it needs a closer look at that specific image.
 
 ## Regions from the label map
 
@@ -123,11 +170,30 @@ data/scenes/<id>/<image>_classes.txt      class coverage, named after the source
 data/scenes/<id>/labels.png               the sphere label map
 data/scenes/<id>/overlay.png              the photo with segmentation painted over it
 data/scenes/<id>/overlay_labeled.png      the same, with class names written on the regions
+data/scenes/<id>/overlay_labels.png       just the class-name callouts, transparent background
 ```
 
 `overlay.png` is the pitch asset: one image proving the sound placement is derived from
 the picture rather than hand-placed. Put it on a slide even if the demo runs on
 hand-tuned geometry.
+
+`overlay_labeled.png` (tint baked in) and `overlay_labels.png` (transparent) carry the
+same callouts from the same `draw_region_labels()` — the viewer's "Labels" toggle loads
+`overlay_labels.png` directly rather than diffing it back out of the combined image, and
+the callouts render noticeably smaller than before (13 Sep 2026, two passes: first
+`max(14, w/70)` -> `max(10, w/130)`, then, still "too big and clumsy" per Tom, a flat 65%
+of that -> `max(7, w/200)`) since a debug overlay of ~10-15 regions was crowding the
+photo. Box fill is also more translucent now (alpha 205 -> 120, roughly 80% -> 47%
+opacity) so the photo reads through it. `regen_overlays.py` rebuilds all three from an
+existing `scene.segmented.json` — no model, no re-running `segment_panorama.py` — so it's
+the right tool any time only the label rendering changed.
+
+Also fixed 13 Sep: `regen_overlays.py`'s default `--scenes` path was computed locally as
+`image_analysis/data/scenes`, left over from before image_analysis and 360viewer_app were
+folded into one project root. That folder doesn't exist — scenes live under
+`360viewer_app/data/scenes`, which is what `paths.py`'s `SCENES_DIR` already correctly
+points at. A bare `python regen_overlays.py` would have raised `FileNotFoundError`
+immediately. Now imports `SCENES_DIR` from `paths.py` instead of re-deriving it.
 
 ## North
 

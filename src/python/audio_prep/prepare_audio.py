@@ -75,8 +75,18 @@ HINTS = [
     # Human presence. Authored at "busy day" level and held down until the pressure
     # control is raised, so the slider REVEALS them instead of merely turning them up.
     (r"footstep|schritt|step", "footsteps", dict(az=0,   el=-60, spread=40, distance=2,   gain=-8, focus=3, tags=["human"])),
+    # Field takes labelled "_persons" (plural, our own naming convention) — kept as a
+    # distinct class from "voices" below so build_scene_layers.py can pool it together
+    # with `footsteps` as interchangeable ways to hear someone nearby. See MERGE_CLASSES
+    # in build_scene_layers.py.
+    (r"person", "person",              dict(az=200, el=-5,  spread=50, distance=60,  gain=-4, focus=7, tags=["human"])),
     (r"voice|stimme|people|crowd|talk", "voices",
                                             dict(az=120, el=-8,  spread=50, distance=40,  gain=-6, focus=6, tags=["human"])),
+    # A plane passing overhead — occasional, not a bed. See FORCE_EVENT_CLASSES and
+    # EVENT_RATE below: this stays a rare one-shot even though the source recording is
+    # almost certainly longer than the 12 s "event" duration default.
+    (r"airplane|aircraft|flugzeug", "airplane",
+                                            dict(az=0,   el=55,  spread=180, distance=1800, gain=-10, focus=4, tags=["human"])),
     (r"lift|seilbahn|gondel|cable|road|traffic|car", "infrastructure",
                                             dict(az=60,  el=8,   spread=40, distance=250, gain=-2, focus=8, tags=["human"])),
 
@@ -95,6 +105,21 @@ HINTS = [
     (r"^cablecar",  "cablecar",  dict(az=60,  el=8,   spread=40, distance=250, gain=-2, focus=8, tags=["human"])),
     (r"^person",    "person",    dict(az=200, el=-5,  spread=50, distance=60,  gain=-4, focus=7, tags=["human"])),
 ]
+
+# Classes whose recording should stay a single one-shot EVENT even though it runs
+# longer than --event-max-seconds. An airplane flyover has a natural fade in/out; the
+# alternative (treating it as a region because it's 20+ seconds long) would loop-fold
+# and crossfade it into an ambience bed, which destroys that shape.
+FORCE_EVENT_CLASSES = {"airplane"}
+
+# How often a one-shot class re-triggers. Most events (footsteps, cattle, birds) want
+# to feel present; an aircraft passing overhead should be rare — "occasionally, not
+# always" — so it gets its own much lower rate. `jitter` (0-1) widens the gap between
+# triggers randomly so the interval never feels metronomic.
+DEFAULT_EVENT_RATE = dict(ratePerMin=6, jitter=0.7)
+EVENT_RATE = {
+    "airplane": dict(ratePerMin=0.4, jitter=0.9),
+}
 
 
 def need(tool):
@@ -336,7 +361,7 @@ def main():
             print(f"  {path.name:<28} {dur:6.1f}s  skipped — labelled unusable")
             continue
         cls, geom = classify(path.stem, labels)
-        is_event = dur <= args.event_max_seconds
+        is_event = dur <= args.event_max_seconds or cls in FORCE_EVENT_CLASSES
         name = cls or path.stem.lower().replace("_", "-")
         # Only avoid collisions WITHIN this run. Colliding with a file from a previous
         # run means the same recording again, so overwrite it — otherwise every re-run
@@ -355,7 +380,7 @@ def main():
             if reuse:
                 kind = ("event" if is_event else
                         "bed" if name in ("wind", "bed") else "region")
-                extra = dict(ratePerMin=6, jitter=0.7) if is_event else {}
+                extra = EVENT_RATE.get(cls, DEFAULT_EVENT_RATE) if is_event else {}
                 print(f"  {path.name:<28} {dur:6.1f}s  reused   -> {dest.name}")
             elif is_event:
                 y = decode(path, SR, mono=True)
@@ -363,7 +388,7 @@ def main():
                 encode(y, SR, dest, 1)
                 if args.ogg:
                     encode(y, SR, dest.with_suffix(".ogg"), 1)
-                kind, extra = "event", dict(ratePerMin=6, jitter=0.7)
+                kind, extra = "event", EVENT_RATE.get(cls, DEFAULT_EVENT_RATE)
                 print(f"  {path.name:<28} {dur:6.1f}s  event    -> {dest.name}")
             else:
                 mono = decode(path, ANALYSIS_SR, mono=True)
